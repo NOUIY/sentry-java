@@ -3,6 +3,7 @@ package io.sentry;
 import io.sentry.protocol.Message;
 import io.sentry.protocol.SentryId;
 import io.sentry.protocol.SentryTransaction;
+import io.sentry.transport.RateLimiter;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -26,10 +27,17 @@ public interface ISentryClient {
    * @return The Id (SentryId object) of the event.
    */
   @NotNull
-  SentryId captureEvent(@NotNull SentryEvent event, @Nullable Scope scope, @Nullable Hint hint);
+  SentryId captureEvent(@NotNull SentryEvent event, @Nullable IScope scope, @Nullable Hint hint);
 
   /** Flushes out the queue for up to timeout seconds and disable the client. */
   void close();
+
+  /**
+   * Flushes out the queue for up to timeout seconds and disable the client.
+   *
+   * @param isRestarting if true, avoids locking the main thread when finishing the queue.
+   */
+  void close(boolean isRestarting);
 
   /**
    * Flushes events queued up, but keeps the client enabled. Not implemented yet.
@@ -55,7 +63,7 @@ public interface ISentryClient {
    * @param scope An optional scope to be applied to the event.
    * @return The Id (SentryId object) of the event
    */
-  default @NotNull SentryId captureEvent(@NotNull SentryEvent event, @Nullable Scope scope) {
+  default @NotNull SentryId captureEvent(@NotNull SentryEvent event, @Nullable IScope scope) {
     return captureEvent(event, scope, null);
   }
 
@@ -79,7 +87,7 @@ public interface ISentryClient {
    * @return The Id (SentryId object) of the event
    */
   default @NotNull SentryId captureMessage(
-      @NotNull String message, @NotNull SentryLevel level, @Nullable Scope scope) {
+      @NotNull String message, @NotNull SentryLevel level, @Nullable IScope scope) {
     SentryEvent event = new SentryEvent();
     Message sentryMessage = new Message();
     sentryMessage.setFormatted(message);
@@ -119,7 +127,7 @@ public interface ISentryClient {
    * @return The Id (SentryId object) of the event
    */
   default @NotNull SentryId captureException(
-      @NotNull Throwable throwable, @Nullable Scope scope, @Nullable Hint hint) {
+      @NotNull Throwable throwable, @Nullable IScope scope, @Nullable Hint hint) {
     SentryEvent event = new SentryEvent(throwable);
     return captureEvent(event, scope, hint);
   }
@@ -142,9 +150,13 @@ public interface ISentryClient {
    * @param scope An optional scope to be applied to the event.
    * @return The Id (SentryId object) of the event
    */
-  default @NotNull SentryId captureException(@NotNull Throwable throwable, @Nullable Scope scope) {
+  default @NotNull SentryId captureException(@NotNull Throwable throwable, @Nullable IScope scope) {
     return captureException(throwable, scope, null);
   }
+
+  @NotNull
+  SentryId captureReplayEvent(
+      @NotNull SentryReplayEvent event, @Nullable IScope scope, @Nullable Hint hint);
 
   /**
    * Captures a manually created user feedback and sends it to Sentry.
@@ -202,8 +214,25 @@ public interface ISentryClient {
    */
   @NotNull
   default SentryId captureTransaction(
-      @NotNull SentryTransaction transaction, @Nullable Scope scope, @Nullable Hint hint) {
+      @NotNull SentryTransaction transaction, @Nullable IScope scope, @Nullable Hint hint) {
     return captureTransaction(transaction, null, scope, hint);
+  }
+
+  /**
+   * Captures a transaction.
+   *
+   * @param transaction the {@link ITransaction} to send
+   * @param scope An optional scope to be applied to the event.
+   * @param hint SDK specific but provides high level information about the origin of the event
+   * @return The Id (SentryId object) of the event
+   */
+  @NotNull
+  default SentryId captureTransaction(
+      @NotNull SentryTransaction transaction,
+      @Nullable TraceContext traceContext,
+      @Nullable IScope scope,
+      @Nullable Hint hint) {
+    return captureTransaction(transaction, traceContext, scope, hint, null);
   }
 
   /**
@@ -213,6 +242,7 @@ public interface ISentryClient {
    * @param traceContext the trace context
    * @param scope An optional scope to be applied to the event.
    * @param hint SDK specific but provides high level information about the origin of the event
+   * @param profilingTraceData An optional profiling trace data captured during the transaction
    * @return The Id (SentryId object) of the event
    */
   @NotNull
@@ -220,8 +250,9 @@ public interface ISentryClient {
   SentryId captureTransaction(
       @NotNull SentryTransaction transaction,
       @Nullable TraceContext traceContext,
-      @Nullable Scope scope,
-      @Nullable Hint hint);
+      @Nullable IScope scope,
+      @Nullable Hint hint,
+      @Nullable ProfilingTraceData profilingTraceData);
 
   /**
    * Captures a transaction without scope nor hint.
@@ -244,5 +275,18 @@ public interface ISentryClient {
    */
   default @NotNull SentryId captureTransaction(@NotNull SentryTransaction transaction) {
     return captureTransaction(transaction, null, null, null);
+  }
+
+  @NotNull
+  @ApiStatus.Experimental
+  SentryId captureCheckIn(@NotNull CheckIn checkIn, @Nullable IScope scope, @Nullable Hint hint);
+
+  @ApiStatus.Internal
+  @Nullable
+  RateLimiter getRateLimiter();
+
+  @ApiStatus.Internal
+  default boolean isHealthy() {
+    return true;
   }
 }

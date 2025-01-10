@@ -1,15 +1,20 @@
 package io.sentry.transport;
 
+import io.sentry.DateUtils;
 import io.sentry.Hint;
 import io.sentry.ILogger;
 import io.sentry.RequestDetails;
+import io.sentry.SentryDate;
+import io.sentry.SentryDateProvider;
 import io.sentry.SentryEnvelope;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
+import io.sentry.UncaughtExceptionHandlerIntegration;
 import io.sentry.cache.IEnvelopeCache;
 import io.sentry.clientreport.DiscardReason;
 import io.sentry.hints.Cached;
 import io.sentry.hints.DiskFlushNotification;
+import io.sentry.hints.Enqueable;
 import io.sentry.hints.Retryable;
 import io.sentry.hints.SubmissionResult;
 import io.sentry.util.HintUtils;
@@ -21,6 +26,7 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * {@link ITransport} implementation that executes request asynchronously in a blocking manner using
@@ -34,6 +40,7 @@ public final class AsyncHttpTransport implements ITransport {
   private final @NotNull RateLimiter rateLimiter;
   private final @NotNull ITransportGate transportGate;
   private final @NotNull HttpConnection connection;
+  private volatile @Nullable Runnable currentRunnable = null;
 
   public AsyncHttpTransport(
       final @NotNull SentryOptions options,
@@ -42,7 +49,10 @@ public final class AsyncHttpTransport implements ITransport {
       final @NotNull RequestDetails requestDetails) {
     this(
         initExecutor(
-            options.getMaxQueueSize(), options.getEnvelopeDiskCache(), options.getLogger()),
+            options.getMaxQueueSize(),
+            options.getEnvelopeDiskCache(),
+            options.getLogger(),
+            options.getDateProvider()),
         options,
         rateLimiter,
         transportGate,
@@ -84,7 +94,8 @@ public final class AsyncHttpTransport implements ITransport {
       }
     } else {
       SentryEnvelope envelopeThatMayIncludeClientReport;
-      if (HintUtils.hasType(hint, DiskFlushNotification.class)) {
+      if (HintUtils.hasType(
+          hint, UncaughtExceptionHandlerIntegration.UncaughtExceptionHint.class)) {
         envelopeThatMayIncludeClientReport =
             options.getClientReportRecorder().attachReportToEnvelope(filteredEnvelope);
       } else {
@@ -99,6 +110,14 @@ public final class AsyncHttpTransport implements ITransport {
         options
             .getClientReportRecorder()
             .recordLostEnvelope(DiscardReason.QUEUE_OVERFLOW, envelopeThatMayIncludeClientReport);
+      } else {
+        HintUtils.runIfHasType(
+            hint,
+            Enqueable.class,
+            enqueable -> {
+              enqueable.markEnqueued();
+              options.getLogger().log(SentryLevel.DEBUG, "Envelope enqueued");
+            });
       }
     }
   }
@@ -111,7 +130,8 @@ public final class AsyncHttpTransport implements ITransport {
   private static QueuedThreadPoolExecutor initExecutor(
       final int maxQueueSize,
       final @NotNull IEnvelopeCache envelopeCache,
-      final @NotNull ILogger logger) {
+      final @NotNull ILogger logger,
+      final @NotNull SentryDateProvider dateProvider) {
 
     final RejectedExecutionHandler storeEvents =
         (r, executor) -> {
@@ -128,21 +148,47 @@ public final class AsyncHttpTransport implements ITransport {
         };
 
     return new QueuedThreadPoolExecutor(
-        1, maxQueueSize, new AsyncConnectionThreadFactory(), storeEvents, logger);
+        1, maxQueueSize, new AsyncConnectionThreadFactory(), storeEvents, logger, dateProvider);
+  }
+
+  @Override
+  public @NotNull RateLimiter getRateLimiter() {
+    return rateLimiter;
+  }
+
+  @Override
+  public boolean isHealthy() {
+    boolean anyRateLimitActive = rateLimiter.isAnyRateLimitActive();
+    boolean didRejectRecently = executor.didRejectRecently();
+    return !anyRateLimitActive && !didRejectRecently;
   }
 
   @Override
   public void close() throws IOException {
+    close(false);
+  }
+
+  @Override
+  public void close(final boolean isRestarting) throws IOException {
+    rateLimiter.close();
     executor.shutdown();
     options.getLogger().log(SentryLevel.DEBUG, "Shutting down");
     try {
-      if (!executor.awaitTermination(1, TimeUnit.MINUTES)) {
+      // We need a small timeout to be able to save to disk any rejected envelope
+      long timeout = isRestarting ? 0 : options.getFlushTimeoutMillis();
+      if (!executor.awaitTermination(timeout, TimeUnit.MILLISECONDS)) {
         options
             .getLogger()
             .log(
                 SentryLevel.WARNING,
-                "Failed to shutdown the async connection async sender within 1 minute. Trying to force it now.");
+                "Failed to shutdown the async connection async sender  within "
+                    + timeout
+                    + " ms. Trying to force it now.");
         executor.shutdownNow();
+        if (currentRunnable != null) {
+          // We store to disk any envelope that is currently being sent
+          executor.getRejectedExecutionHandler().rejectedExecution(currentRunnable, executor);
+        }
       }
     } catch (InterruptedException e) {
       // ok, just give up then...
@@ -192,6 +238,7 @@ public final class AsyncHttpTransport implements ITransport {
 
     @Override
     public void run() {
+      currentRunnable = this;
       TransportResult result = this.failedResult;
       try {
         result = flush();
@@ -213,26 +260,42 @@ public final class AsyncHttpTransport implements ITransport {
                       finalResult.isSuccess());
               submissionResult.setResult(finalResult.isSuccess());
             });
+        currentRunnable = null;
       }
     }
 
     private @NotNull TransportResult flush() {
       TransportResult result = this.failedResult;
 
+      envelope.getHeader().setSentAt(null);
       envelopeCache.store(envelope, hint);
 
       HintUtils.runIfHasType(
           hint,
           DiskFlushNotification.class,
           (diskFlushNotification) -> {
-            diskFlushNotification.markFlushed();
-            options.getLogger().log(SentryLevel.DEBUG, "Disk flush envelope fired");
+            if (diskFlushNotification.isFlushable(envelope.getHeader().getEventId())) {
+              diskFlushNotification.markFlushed();
+              options.getLogger().log(SentryLevel.DEBUG, "Disk flush envelope fired");
+            } else {
+              options
+                  .getLogger()
+                  .log(
+                      SentryLevel.DEBUG,
+                      "Not firing envelope flush as there's an ongoing transaction");
+            }
           });
 
       if (transportGate.isConnected()) {
         final SentryEnvelope envelopeWithClientReport =
             options.getClientReportRecorder().attachReportToEnvelope(envelope);
         try {
+
+          @NotNull SentryDate now = options.getDateProvider().now();
+          envelopeWithClientReport
+              .getHeader()
+              .setSentAt(DateUtils.nanosToDate(now.nanoTimestamp()));
+
           result = connection.send(envelopeWithClientReport);
           if (result.isSuccess()) {
             envelopeCache.discard(envelope);

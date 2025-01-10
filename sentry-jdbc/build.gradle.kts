@@ -7,6 +7,7 @@ plugins {
     jacoco
     id(Config.QualityPlugins.errorProne)
     id(Config.QualityPlugins.gradleVersions)
+    id(Config.BuildPlugins.buildConfig) version Config.BuildPlugins.buildConfigVersion
 }
 
 configure<JavaPluginExtension> {
@@ -33,6 +34,7 @@ dependencies {
     testImplementation(kotlin(Config.kotlinStdLib))
     testImplementation(Config.TestLibs.kotlinTestJunit)
     testImplementation(Config.TestLibs.mockitoKotlin)
+    testImplementation(Config.TestLibs.mockitoInline)
     testImplementation(Config.TestLibs.awaitility)
     testImplementation(Config.TestLibs.hsqldb)
 }
@@ -49,8 +51,8 @@ jacoco {
 
 tasks.jacocoTestReport {
     reports {
-        xml.isEnabled = true
-        html.isEnabled = false
+        xml.required.set(true)
+        html.required.set(false)
     }
 }
 
@@ -71,4 +73,11 @@ tasks.withType<JavaCompile>().configureEach {
         check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
         option("NullAway:AnnotatedPackages", "io.sentry")
     }
+}
+
+buildConfig {
+    useJavaOutput()
+    packageName("io.sentry.jdbc")
+    buildConfigField("String", "SENTRY_JDBC_SDK_NAME", "\"${Config.Sentry.SENTRY_JDBC_SDK_NAME}\"")
+    buildConfigField("String", "VERSION_NAME", "\"${project.version}\"")
 }

@@ -1,10 +1,12 @@
 package io.sentry.spring.webflux
 
-import io.sentry.HubAdapter
-import io.sentry.IHub
+import io.sentry.IScopes
 import io.sentry.ITransportFactory
+import io.sentry.ScopesAdapter
 import io.sentry.Sentry
 import io.sentry.checkEvent
+import io.sentry.checkTransaction
+import io.sentry.test.initForTest
 import io.sentry.transport.ITransport
 import org.assertj.core.api.Assertions.assertThat
 import org.awaitility.kotlin.await
@@ -38,6 +40,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 @RunWith(SpringRunner::class)
 @SpringBootTest(
@@ -63,7 +66,7 @@ class SentryWebfluxIntegrationTest {
     @Test
     fun `attaches request information to SentryEvents`() {
         testClient.get()
-            .uri("http://localhost:$port/hello?param=value")
+            .uri("http://localhost:$port/hello?param=value#top")
             .exchange()
             .expectStatus()
             .isOk
@@ -71,9 +74,10 @@ class SentryWebfluxIntegrationTest {
         verify(transport).send(
             checkEvent { event ->
                 assertNotNull(event.request) {
-                    assertEquals("http://localhost:$port/hello?param=value", it.url)
+                    assertEquals("http://localhost:$port/hello", it.url)
                     assertEquals("GET", it.method)
                     assertEquals("param=value", it.queryString)
+                    assertNull(it.fragment)
                 }
             },
             anyOrNull()
@@ -92,10 +96,11 @@ class SentryWebfluxIntegrationTest {
             checkEvent { event ->
                 assertEquals("GET /throws", event.transaction)
                 assertNotNull(event.exceptions) {
-                    val ex = it.first()
+                    val ex = it.last()
                     assertEquals("something went wrong", ex.value)
                     assertNotNull(ex.mechanism) {
                         assertThat(it.isHandled).isFalse()
+                        assertThat(it.type).isEqualTo(SentryWebExceptionHandler.MECHANISM_TYPE)
                     }
                 }
             },
@@ -120,12 +125,30 @@ class SentryWebfluxIntegrationTest {
             )
         }
     }
+
+    @Test
+    fun `sends transaction`() {
+        testClient.get()
+            .uri("http://localhost:$port/hello?param=value#top")
+            .exchange()
+            .expectStatus()
+            .isOk
+
+        verify(transport).send(
+            checkTransaction { event ->
+                assertEquals("GET /hello", event.transaction)
+            },
+            anyOrNull()
+        )
+    }
 }
 
 @SpringBootApplication(exclude = [ReactiveSecurityAutoConfiguration::class, SecurityAutoConfiguration::class])
 open class App {
 
-    private val transport = mock<ITransport>()
+    private val transport = mock<ITransport>().also {
+        whenever(it.isHealthy).thenReturn(true)
+    }
 
     @Bean
     open fun mockTransportFactory(): ITransportFactory {
@@ -138,13 +161,13 @@ open class App {
     open fun mockTransport() = transport
 
     @Bean
-    open fun hub() = HubAdapter.getInstance()
+    open fun scopes() = ScopesAdapter.getInstance()
 
     @Bean
-    open fun sentryFilter(hub: IHub) = SentryWebFilter(hub)
+    open fun sentryFilter(scopes: IScopes) = SentryWebFilter(scopes)
 
     @Bean
-    open fun sentryWebExceptionHandler(hub: IHub) = SentryWebExceptionHandler(hub)
+    open fun sentryWebExceptionHandler(scopes: IScopes) = SentryWebExceptionHandler(scopes)
 
     @Bean
     open fun sentryScheduleHookRegistrar() = ApplicationRunner {
@@ -153,10 +176,11 @@ open class App {
 
     @Bean
     open fun sentryInitializer(transportFactory: ITransportFactory) = ApplicationRunner {
-        Sentry.init {
+        initForTest {
             it.dsn = "http://key@localhost/proj"
             it.setDebug(true)
             it.setTransportFactory(transportFactory)
+            it.tracesSampleRate = 1.0
         }
     }
 }

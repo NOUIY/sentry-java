@@ -2,11 +2,12 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.util.CollectionUtils;
+import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.Map;
@@ -103,6 +104,24 @@ public final class OperatingSystem implements JsonUnknown, JsonSerializable {
     this.rooted = rooted;
   }
 
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    OperatingSystem that = (OperatingSystem) o;
+    return Objects.equals(name, that.name)
+        && Objects.equals(version, that.version)
+        && Objects.equals(rawDescription, that.rawDescription)
+        && Objects.equals(build, that.build)
+        && Objects.equals(kernelVersion, that.kernelVersion)
+        && Objects.equals(rooted, that.rooted);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(name, version, rawDescription, build, kernelVersion, rooted);
+  }
+
   // JsonSerializable
 
   public static final class JsonKeys {
@@ -115,7 +134,7 @@ public final class OperatingSystem implements JsonUnknown, JsonSerializable {
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (name != null) {
@@ -161,7 +180,7 @@ public final class OperatingSystem implements JsonUnknown, JsonSerializable {
 
     @Override
     public @NotNull OperatingSystem deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       reader.beginObject();
       OperatingSystem operatingSystem = new OperatingSystem();
       Map<String, Object> unknown = null;

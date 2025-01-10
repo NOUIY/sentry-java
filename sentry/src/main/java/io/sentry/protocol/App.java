@@ -2,14 +2,16 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.util.CollectionUtils;
+import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jetbrains.annotations.NotNull;
@@ -38,6 +40,15 @@ public final class App implements JsonUnknown, JsonSerializable {
   private @Nullable String appBuild;
   /** Application permissions in the form of "permission_name" : "granted|not_granted" */
   private @Nullable Map<String, String> permissions;
+  /** The list of the visible UI screens * */
+  private @Nullable List<String> viewNames;
+  /** the app start type */
+  private @Nullable String startType;
+  /**
+   * A flag indicating whether the app is in foreground or not. An app is in foreground when it's
+   * visible to the user.
+   */
+  private @Nullable Boolean inForeground;
 
   public App() {}
 
@@ -50,6 +61,9 @@ public final class App implements JsonUnknown, JsonSerializable {
     this.buildType = app.buildType;
     this.deviceAppHash = app.deviceAppHash;
     this.permissions = CollectionUtils.newConcurrentHashMap(app.permissions);
+    this.inForeground = app.inForeground;
+    this.viewNames = CollectionUtils.newArrayList(app.viewNames);
+    this.startType = app.startType;
     this.unknown = CollectionUtils.newConcurrentHashMap(app.unknown);
   }
 
@@ -122,6 +136,67 @@ public final class App implements JsonUnknown, JsonSerializable {
     this.permissions = permissions;
   }
 
+  @Nullable
+  public Boolean getInForeground() {
+    return inForeground;
+  }
+
+  public void setInForeground(final @Nullable Boolean inForeground) {
+    this.inForeground = inForeground;
+  }
+
+  @Nullable
+  public List<String> getViewNames() {
+    return viewNames;
+  }
+
+  public void setViewNames(final @Nullable List<String> viewNames) {
+    this.viewNames = viewNames;
+  }
+
+  @Nullable
+  public String getStartType() {
+    return startType;
+  }
+
+  public void setStartType(final @Nullable String startType) {
+    this.startType = startType;
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    App app = (App) o;
+    return Objects.equals(appIdentifier, app.appIdentifier)
+        && Objects.equals(appStartTime, app.appStartTime)
+        && Objects.equals(deviceAppHash, app.deviceAppHash)
+        && Objects.equals(buildType, app.buildType)
+        && Objects.equals(appName, app.appName)
+        && Objects.equals(appVersion, app.appVersion)
+        && Objects.equals(appBuild, app.appBuild)
+        && Objects.equals(permissions, app.permissions)
+        && Objects.equals(inForeground, app.inForeground)
+        && Objects.equals(viewNames, app.viewNames)
+        && Objects.equals(startType, app.startType);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(
+        appIdentifier,
+        appStartTime,
+        deviceAppHash,
+        buildType,
+        appName,
+        appVersion,
+        appBuild,
+        permissions,
+        inForeground,
+        viewNames,
+        startType);
+  }
+
   // region json
 
   @Nullable
@@ -144,10 +219,13 @@ public final class App implements JsonUnknown, JsonSerializable {
     public static final String APP_VERSION = "app_version";
     public static final String APP_BUILD = "app_build";
     public static final String APP_PERMISSIONS = "permissions";
+    public static final String IN_FOREGROUND = "in_foreground";
+    public static final String VIEW_NAMES = "view_names";
+    public static final String START_TYPE = "start_type";
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (appIdentifier != null) {
@@ -174,6 +252,15 @@ public final class App implements JsonUnknown, JsonSerializable {
     if (permissions != null && !permissions.isEmpty()) {
       writer.name(JsonKeys.APP_PERMISSIONS).value(logger, permissions);
     }
+    if (inForeground != null) {
+      writer.name(JsonKeys.IN_FOREGROUND).value(inForeground);
+    }
+    if (viewNames != null) {
+      writer.name(JsonKeys.VIEW_NAMES).value(logger, viewNames);
+    }
+    if (startType != null) {
+      writer.name(JsonKeys.START_TYPE).value(startType);
+    }
     if (unknown != null) {
       for (String key : unknown.keySet()) {
         Object value = unknown.get(key);
@@ -186,7 +273,7 @@ public final class App implements JsonUnknown, JsonSerializable {
   public static final class Deserializer implements JsonDeserializer<App> {
     @SuppressWarnings("unchecked")
     @Override
-    public @NotNull App deserialize(@NotNull JsonObjectReader reader, @NotNull ILogger logger)
+    public @NotNull App deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
         throws Exception {
       reader.beginObject();
       App app = new App();
@@ -219,6 +306,18 @@ public final class App implements JsonUnknown, JsonSerializable {
             app.permissions =
                 CollectionUtils.newConcurrentHashMap(
                     (Map<String, String>) reader.nextObjectOrNull());
+            break;
+          case JsonKeys.IN_FOREGROUND:
+            app.inForeground = reader.nextBooleanOrNull();
+            break;
+          case JsonKeys.VIEW_NAMES:
+            final @Nullable List<String> viewNames = (List<String>) reader.nextObjectOrNull();
+            if (viewNames != null) {
+              app.setViewNames(viewNames);
+            }
+            break;
+          case JsonKeys.START_TYPE:
+            app.startType = reader.nextStringOrNull();
             break;
           default:
             if (unknown == null) {

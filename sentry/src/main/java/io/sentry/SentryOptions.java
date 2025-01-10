@@ -1,22 +1,32 @@
 package io.sentry;
 
 import com.jakewharton.nopen.annotation.Open;
+import io.sentry.backpressure.IBackpressureMonitor;
+import io.sentry.backpressure.NoOpBackpressureMonitor;
 import io.sentry.cache.IEnvelopeCache;
 import io.sentry.clientreport.ClientReportRecorder;
 import io.sentry.clientreport.IClientReportRecorder;
 import io.sentry.clientreport.NoOpClientReportRecorder;
+import io.sentry.internal.debugmeta.IDebugMetaLoader;
+import io.sentry.internal.debugmeta.NoOpDebugMetaLoader;
 import io.sentry.internal.gestures.GestureTargetLocator;
 import io.sentry.internal.modules.IModulesLoader;
 import io.sentry.internal.modules.NoOpModulesLoader;
+import io.sentry.internal.viewhierarchy.ViewHierarchyExporter;
 import io.sentry.protocol.SdkVersion;
 import io.sentry.protocol.SentryTransaction;
 import io.sentry.transport.ITransport;
 import io.sentry.transport.ITransportGate;
 import io.sentry.transport.NoOpEnvelopeCache;
 import io.sentry.transport.NoOpTransportGate;
+import io.sentry.util.AutoClosableReentrantLock;
+import io.sentry.util.LazyEvaluator;
+import io.sentry.util.LoadClass;
 import io.sentry.util.Platform;
 import io.sentry.util.SampleRateUtils;
 import io.sentry.util.StringUtils;
+import io.sentry.util.thread.IThreadChecker;
+import io.sentry.util.thread.NoOpThreadChecker;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -28,7 +38,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CopyOnWriteArraySet;
-import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLSocketFactory;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
@@ -39,8 +48,16 @@ import org.jetbrains.annotations.TestOnly;
 @Open
 public class SentryOptions {
 
+  @ApiStatus.Internal public static final @NotNull String DEFAULT_PROPAGATION_TARGETS = ".*";
+
   /** Default Log level if not specified Default is DEBUG */
   static final SentryLevel DEFAULT_DIAGNOSTIC_LEVEL = SentryLevel.DEBUG;
+
+  /**
+   * Default value for {@link SentryEvent#getEnvironment()} set when {@link SentryOptions} do not
+   * have the environment field set.
+   */
+  private static final String DEFAULT_ENVIRONMENT = "production";
 
   /**
    * Are callbacks that run for every event. They can either return a new event which in most cases
@@ -58,11 +75,17 @@ public class SentryOptions {
    */
   private final @NotNull List<Integration> integrations = new CopyOnWriteArrayList<>();
 
+  /** List of bundle IDs representing source bundles. */
+  private final @NotNull Set<String> bundleIds = new CopyOnWriteArraySet<>();
+
   /**
    * The DSN tells the SDK where to send the events to. If this value is not provided, the SDK will
    * just not send any events.
    */
   private @Nullable String dsn;
+
+  /** Parsed DSN to avoid parsing it every time. */
+  private final @NotNull LazyEvaluator<Dsn> parsedDsn = new LazyEvaluator<>(() -> new Dsn(dsn));
 
   /** dsnHash is used as a subfolder of cacheDirPath to isolate events when rotating DSNs */
   private @Nullable String dsnHash;
@@ -82,13 +105,17 @@ public class SentryOptions {
   private long flushTimeoutMillis = 15000; // 15s
 
   /**
+   * Controls how many seconds to wait before flushing previous session. Sentry SDKs finalizes
+   * unfinished sessions from a background queue and this queue is given a certain amount to drain
+   * sessions. Default is 15000 = 15s
+   */
+  private long sessionFlushTimeoutMillis = 15000; // 15s
+
+  /**
    * Turns debug mode on or off. If debug is enabled SDK will attempt to print out useful debugging
    * information if something goes wrong. Default is disabled.
    */
   private boolean debug;
-
-  /** Turns NDK on or off. Default is enabled. */
-  private boolean enableNdk = true;
 
   /** Logger interface to log useful debugging information if debug is enabled */
   private @NotNull ILogger logger = NoOpLogger.getInstance();
@@ -96,11 +123,13 @@ public class SentryOptions {
   /** minimum LogLevel to be used if debug is enabled */
   private @NotNull SentryLevel diagnosticLevel = DEFAULT_DIAGNOSTIC_LEVEL;
 
-  /** Envelope reader interface */
-  private @NotNull IEnvelopeReader envelopeReader = new EnvelopeReader(new JsonSerializer(this));
-
   /** Serializer interface to serialize/deserialize json events */
-  private @NotNull ISerializer serializer = new JsonSerializer(this);
+  private final @NotNull LazyEvaluator<ISerializer> serializer =
+      new LazyEvaluator<>(() -> new JsonSerializer(this));
+
+  /** Envelope reader interface */
+  private final @NotNull LazyEvaluator<IEnvelopeReader> envelopeReader =
+      new LazyEvaluator<>(() -> new EnvelopeReader(serializer.getValue()));
 
   /** Max depth when serializing object graphs with reflection. * */
   private int maxDepth = 100;
@@ -122,6 +151,12 @@ public class SentryOptions {
    * transaction object or nothing to skip reporting the transaction
    */
   private @Nullable BeforeSendTransactionCallback beforeSendTransaction;
+
+  /**
+   * This function is called with an SDK specific replay object and can return a modified replay
+   * object or nothing to skip reporting the replay
+   */
+  private @Nullable BeforeSendReplayCallback beforeSendReplay;
 
   /**
    * This function is called with an SDK specific breadcrumb object before the breadcrumb is added
@@ -177,6 +212,8 @@ public class SentryOptions {
    * to be sent to Sentry.
    */
   private @Nullable TracesSamplerCallback tracesSampler;
+
+  private volatile @Nullable TracesSampler internalTracesSampler;
 
   /**
    * A list of string prefixes of module names that do not belong to the app, but rather third-party
@@ -261,20 +298,13 @@ public class SentryOptions {
   /** whether to send personal identifiable information along with events */
   private boolean sendDefaultPii = false;
 
-  /** HostnameVerifier for self-signed certificate trust* */
-  private @Nullable HostnameVerifier hostnameVerifier;
-
   /** SSLSocketFactory for self-signed certificate trust * */
   private @Nullable SSLSocketFactory sslSocketFactory;
 
   /** list of scope observers */
-  private final @NotNull List<IScopeObserver> observers = new ArrayList<>();
+  private final @NotNull List<IScopeObserver> observers = new CopyOnWriteArrayList<>();
 
-  /**
-   * Enable the Java to NDK Scope sync. The default value for sentry-java is disabled and enabled
-   * for sentry-android.
-   */
-  private boolean enableScopeSync;
+  private final @NotNull List<IOptionsObserver> optionsObservers = new CopyOnWriteArrayList<>();
 
   /**
    * Enables loading additional options from external locations like {@code sentry.properties} file
@@ -298,7 +328,7 @@ public class SentryOptions {
   /** Maximum number of spans that can be atteched to single transaction. */
   private int maxSpans = 1000;
 
-  /** Registers hook that flushes {@link Hub} when main thread shuts down. */
+  /** Registers hook that flushes {@link Scopes} when main thread shuts down. */
   private boolean enableShutdownHook = true;
 
   /**
@@ -339,7 +369,7 @@ public class SentryOptions {
   private @Nullable List<String> tracePropagationTargets = null;
 
   private final @NotNull List<String> defaultTracePropagationTargets =
-      Collections.singletonList(".*");
+      Collections.singletonList(DEFAULT_PROPAGATION_TARGETS);
 
   /** Proguard UUID. */
   private @Nullable String proguardUuid;
@@ -369,6 +399,9 @@ public class SentryOptions {
   /** Modules (dependencies, packages) that will be send along with each event. */
   private @NotNull IModulesLoader modulesLoader = NoOpModulesLoader.getInstance();
 
+  /** Loads sentry-debug-meta.properties containing ProGuard UUID, bundle IDs etc. */
+  private @NotNull IDebugMetaLoader debugMetaLoader = NoOpDebugMetaLoader.getInstance();
+
   /** Enables the Auto instrumentation for user interaction tracing. */
   private boolean enableUserInteractionTracing = false;
 
@@ -378,8 +411,111 @@ public class SentryOptions {
   /** Which framework is responsible for instrumenting. */
   private @NotNull Instrumenter instrumenter = Instrumenter.SENTRY;
 
-  /** Contains a list of GestureTargetLocator instances used for user interaction tracking * */
+  /** Contains a list of GestureTargetLocator instances used for user interaction tracking */
   private final @NotNull List<GestureTargetLocator> gestureTargetLocators = new ArrayList<>();
+
+  /**
+   * Contains a list of ViewHierarchyExporter instances used for extracting non Android system View
+   * Hierarchy elements
+   */
+  private final @NotNull List<ViewHierarchyExporter> viewHierarchyExporters = new ArrayList<>();
+
+  private @NotNull IThreadChecker threadChecker = NoOpThreadChecker.getInstance();
+
+  // TODO [MAJOR] this should default to false on the next major
+  /** Whether OPTIONS requests should be traced. */
+  private boolean traceOptionsRequests = true;
+
+  /** Date provider to retrieve the current date from. */
+  @ApiStatus.Internal
+  private final @NotNull LazyEvaluator<SentryDateProvider> dateProvider =
+      new LazyEvaluator<>(() -> new SentryAutoDateProvider());
+
+  private final @NotNull List<IPerformanceCollector> performanceCollectors = new ArrayList<>();
+
+  /** Performance collector that collect performance stats while transactions run. */
+  private @NotNull TransactionPerformanceCollector transactionPerformanceCollector =
+      NoOpTransactionPerformanceCollector.getInstance();
+
+  /** Enables the time-to-full-display spans in navigation transactions. */
+  private boolean enableTimeToFullDisplayTracing = false;
+
+  /** Screen fully displayed reporter, used for time-to-full-display spans. */
+  private @NotNull FullyDisplayedReporter fullyDisplayedReporter =
+      FullyDisplayedReporter.getInstance();
+
+  private @NotNull IConnectionStatusProvider connectionStatusProvider =
+      new NoOpConnectionStatusProvider();
+
+  /** Whether Sentry should be enabled */
+  private boolean enabled = true;
+
+  /** Whether to format serialized data, e.g. events logged to console in debug mode */
+  private boolean enablePrettySerializationOutput = true;
+
+  /** Whether to send modules containing information about versions. */
+  private boolean sendModules = true;
+
+  private @Nullable BeforeEnvelopeCallback beforeEnvelopeCallback;
+
+  private boolean enableSpotlight = false;
+
+  private @Nullable String spotlightConnectionUrl;
+
+  /** Whether to enable scope persistence so the scope values are preserved if the process dies */
+  private boolean enableScopePersistence = true;
+
+  /** Contains a list of monitor slugs for which check-ins should not be sent. */
+  @ApiStatus.Experimental private @Nullable List<FilterString> ignoredCheckIns = null;
+
+  /** Contains a list of span origins for which spans / transactions should not be created. */
+  @ApiStatus.Experimental private @Nullable List<FilterString> ignoredSpanOrigins = null;
+
+  private @Nullable List<FilterString> ignoredTransactions = null;
+
+  @ApiStatus.Experimental
+  private @NotNull IBackpressureMonitor backpressureMonitor = NoOpBackpressureMonitor.getInstance();
+
+  private boolean enableBackpressureHandling = true;
+
+  /** Whether to profile app launches, depending on profilesSampler or profilesSampleRate. */
+  private boolean enableAppStartProfiling = false;
+
+  private @NotNull ISpanFactory spanFactory = NoOpSpanFactory.getInstance();
+
+  /**
+   * Profiling traces rate. 101 hz means 101 traces in 1 second. Defaults to 101 to avoid possible
+   * lockstep sampling. More on
+   * https://stackoverflow.com/questions/45470758/what-is-lockstep-sampling
+   */
+  private int profilingTracesHz = 101;
+
+  @ApiStatus.Experimental private @Nullable Cron cron = null;
+
+  private final @NotNull ExperimentalOptions experimental;
+
+  private @NotNull ReplayController replayController = NoOpReplayController.getInstance();
+
+  /**
+   * Controls whether to enable screen tracking. When enabled, the SDK will automatically capture
+   * screen transitions as context for events.
+   */
+  @ApiStatus.Experimental private boolean enableScreenTracking = true;
+
+  private @NotNull ScopeType defaultScopeType = ScopeType.ISOLATION;
+
+  private @NotNull InitPriority initPriority = InitPriority.MEDIUM;
+
+  private boolean forceInit = false;
+
+  // TODO replace hub in name
+  private @Nullable Boolean globalHubMode = null;
+
+  protected final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+
+  private @NotNull SentryOpenTelemetryMode openTelemetryMode = SentryOpenTelemetryMode.AUTO;
+
+  private @NotNull SentryReplayOptions sessionReplay;
 
   /**
    * Adds an event processor
@@ -418,12 +554,25 @@ public class SentryOptions {
   }
 
   /**
-   * Returns the DSN
+   * Returns the DSN.
    *
    * @return the DSN or null if not set
    */
   public @Nullable String getDsn() {
     return dsn;
+  }
+
+  /**
+   * Evaluates and parses the DSN. May throw an exception if the DSN is invalid. Renamed from
+   * `getParsedDsn` as this would cause an error when deploying as WAR to Tomcat due to `JNDI`
+   * property binding.
+   *
+   * @return the parsed DSN or throws if dsn is invalid
+   */
+  @ApiStatus.Internal
+  @NotNull
+  Dsn retrieveParsedDsn() throws IllegalArgumentException {
+    return parsedDsn.getValue();
   }
 
   /**
@@ -433,6 +582,7 @@ public class SentryOptions {
    */
   public void setDsn(final @Nullable String dsn) {
     this.dsn = dsn;
+    this.parsedDsn.resetValue();
 
     dsnHash = StringUtils.calculateStringHash(this.dsn, logger);
   }
@@ -497,7 +647,7 @@ public class SentryOptions {
    * @return the serializer
    */
   public @NotNull ISerializer getSerializer() {
-    return serializer;
+    return serializer.getValue();
   }
 
   /**
@@ -506,7 +656,7 @@ public class SentryOptions {
    * @param serializer the serializer
    */
   public void setSerializer(@Nullable ISerializer serializer) {
-    this.serializer = serializer != null ? serializer : NoOpSerializer.getInstance();
+    this.serializer.setValue(serializer != null ? serializer : NoOpSerializer.getInstance());
   }
 
   /**
@@ -528,42 +678,12 @@ public class SentryOptions {
   }
 
   public @NotNull IEnvelopeReader getEnvelopeReader() {
-    return envelopeReader;
+    return envelopeReader.getValue();
   }
 
   public void setEnvelopeReader(final @Nullable IEnvelopeReader envelopeReader) {
-    this.envelopeReader =
-        envelopeReader != null ? envelopeReader : NoOpEnvelopeReader.getInstance();
-  }
-
-  /**
-   * Check if NDK is ON or OFF Default is ON
-   *
-   * @return true if ON or false otherwise
-   */
-  public boolean isEnableNdk() {
-    return enableNdk;
-  }
-
-  /**
-   * Sets NDK to ON or OFF
-   *
-   * @param enableNdk true if ON or false otherwise
-   */
-  public void setEnableNdk(boolean enableNdk) {
-    this.enableNdk = enableNdk;
-  }
-
-  /**
-   * Returns the shutdown timeout in Millis
-   *
-   * @deprecated use {{@link SentryOptions#getShutdownTimeoutMillis()} }
-   * @return the timeout in Millis
-   */
-  @ApiStatus.ScheduledForRemoval
-  @Deprecated
-  public long getShutdownTimeout() {
-    return shutdownTimeoutMillis;
+    this.envelopeReader.setValue(
+        envelopeReader != null ? envelopeReader : NoOpEnvelopeReader.getInstance());
   }
 
   /**
@@ -573,18 +693,6 @@ public class SentryOptions {
    */
   public long getShutdownTimeoutMillis() {
     return shutdownTimeoutMillis;
-  }
-
-  /**
-   * Sets the shutdown timeout in Millis Default is 2000 = 2s
-   *
-   * @deprecated use {{@link SentryOptions#setShutdownTimeoutMillis(long)} }
-   * @param shutdownTimeoutMillis the shutdown timeout in millis
-   */
-  @ApiStatus.ScheduledForRemoval
-  @Deprecated
-  public void setShutdownTimeout(long shutdownTimeoutMillis) {
-    this.shutdownTimeoutMillis = shutdownTimeoutMillis;
   }
 
   /**
@@ -652,6 +760,24 @@ public class SentryOptions {
   }
 
   /**
+   * Returns the BeforeSendReplay callback
+   *
+   * @return the beforeSend callback or null if not set
+   */
+  public @Nullable BeforeSendReplayCallback getBeforeSendReplay() {
+    return beforeSendReplay;
+  }
+
+  /**
+   * Sets the beforeSendReplay callback
+   *
+   * @param beforeSendReplay the beforeSend callback
+   */
+  public void setBeforeSendReplay(@Nullable BeforeSendReplayCallback beforeSendReplay) {
+    this.beforeSendReplay = beforeSendReplay;
+  }
+
+  /**
    * Returns the beforeBreadcrumb callback
    *
    * @return the beforeBreadcrumb callback or null if not set
@@ -680,6 +806,20 @@ public class SentryOptions {
     }
 
     return dsnHash != null ? new File(cacheDirPath, dsnHash).getAbsolutePath() : cacheDirPath;
+  }
+
+  /**
+   * Returns the cache dir path if set, without the appended dsn hash.
+   *
+   * @return the cache dir path, without the appended dsn hash, or null if not set.
+   */
+  @Nullable
+  String getCacheDirPathWithoutDsn() {
+    if (cacheDirPath == null || cacheDirPath.isEmpty()) {
+      return null;
+    }
+
+    return cacheDirPath;
   }
 
   /**
@@ -743,10 +883,10 @@ public class SentryOptions {
   /**
    * Returns the environment
    *
-   * @return the environment or null if not set
+   * @return the environment or 'production' if not set
    */
   public @Nullable String getEnvironment() {
-    return environment;
+    return environment != null ? environment : DEFAULT_ENVIRONMENT;
   }
 
   /**
@@ -786,7 +926,7 @@ public class SentryOptions {
   }
 
   /**
-   * Sets the sampleRate Can be anything between 0.01 and 1.0 or null (default), to disable it.
+   * Sets the sampleRate Can be anything between 0.0 and 1.0 or null (default), to disable it.
    *
    * @param sampleRate the sample rate
    */
@@ -795,7 +935,7 @@ public class SentryOptions {
       throw new IllegalArgumentException(
           "The value "
               + sampleRate
-              + " is not valid. Use null to disable or values > 0.0 and <= 1.0.");
+              + " is not valid. Use null to disable or values >= 0.0 and <= 1.0.");
     }
     this.sampleRate = sampleRate;
   }
@@ -840,6 +980,18 @@ public class SentryOptions {
    */
   public void setTracesSampler(final @Nullable TracesSamplerCallback tracesSampler) {
     this.tracesSampler = tracesSampler;
+  }
+
+  @ApiStatus.Internal
+  public @NotNull TracesSampler getInternalTracesSampler() {
+    if (internalTracesSampler == null) {
+      try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
+        if (internalTracesSampler == null) {
+          internalTracesSampler = new TracesSampler(this);
+        }
+      }
+    }
+    return internalTracesSampler;
   }
 
   /**
@@ -1242,30 +1394,19 @@ public class SentryOptions {
   }
 
   /**
-   * Returns HostnameVerifier
-   *
-   * @return HostnameVerifier objecr or null
-   */
-  public @Nullable HostnameVerifier getHostnameVerifier() {
-    return hostnameVerifier;
-  }
-
-  /**
-   * Set custom HostnameVerifier
-   *
-   * @param hostnameVerifier the HostnameVerifier
-   */
-  public void setHostnameVerifier(final @Nullable HostnameVerifier hostnameVerifier) {
-    this.hostnameVerifier = hostnameVerifier;
-  }
-
-  /**
    * Sets the SdkVersion object
    *
    * @param sdkVersion the SdkVersion object or null
    */
   @ApiStatus.Internal
   public void setSdkVersion(final @Nullable SdkVersion sdkVersion) {
+    final @Nullable SdkVersion replaySdkVersion = getSessionReplay().getSdkVersion();
+    if (this.sdkVersion != null
+        && replaySdkVersion != null
+        && this.sdkVersion.equals(replaySdkVersion)) {
+      // if sdkVersion = sessionReplay.sdkVersion we override it, as it means no one else set it
+      getSessionReplay().setSdkVersion(sdkVersion);
+    }
     this.sdkVersion = sdkVersion;
   }
 
@@ -1292,26 +1433,27 @@ public class SentryOptions {
    * @return the Scope observer list
    */
   @NotNull
-  List<IScopeObserver> getScopeObservers() {
+  public List<IScopeObserver> getScopeObservers() {
     return observers;
   }
 
   /**
-   * Returns if the Java to NDK Scope sync is enabled
+   * Adds a SentryOptions observer
    *
-   * @return true if enabled or false otherwise
+   * @param observer the Observer
    */
-  public boolean isEnableScopeSync() {
-    return enableScopeSync;
+  public void addOptionsObserver(final @NotNull IOptionsObserver observer) {
+    optionsObservers.add(observer);
   }
 
   /**
-   * Enables or not the Java to NDK Scope sync
+   * Returns the list of SentryOptions observers
    *
-   * @param enableScopeSync true if enabled or false otherwise
+   * @return the SentryOptions observer list
    */
-  public void setEnableScopeSync(boolean enableScopeSync) {
-    this.enableScopeSync = enableScopeSync;
+  @NotNull
+  public List<IOptionsObserver> getOptionsObservers() {
+    return optionsObservers;
   }
 
   /**
@@ -1549,13 +1691,17 @@ public class SentryOptions {
   }
 
   /**
-   * Sets the listener interface to perform operations when a transaction is started or ended.
+   * Sets the listener interface to perform operations when a transaction is started or ended. It
+   * only has effect if no profiler was already set.
    *
    * @param transactionProfiler - the listener for operations when a transaction is started or ended
    */
   public void setTransactionProfiler(final @Nullable ITransactionProfiler transactionProfiler) {
-    this.transactionProfiler =
-        transactionProfiler != null ? transactionProfiler : NoOpTransactionProfiler.getInstance();
+    // We allow to set the profiler only if it was not set before, and we don't allow to unset it.
+    if (this.transactionProfiler == NoOpTransactionProfiler.getInstance()
+        && transactionProfiler != null) {
+      this.transactionProfiler = transactionProfiler;
+    }
   }
 
   /**
@@ -1566,19 +1712,6 @@ public class SentryOptions {
   public boolean isProfilingEnabled() {
     return (getProfilesSampleRate() != null && getProfilesSampleRate() > 0)
         || getProfilesSampler() != null;
-  }
-
-  /**
-   * Sets whether profiling is enabled for transactions.
-   *
-   * @deprecated use {{@link SentryOptions#setProfilesSampleRate(Double)} }
-   * @param profilingEnabled - whether profiling is enabled for transactions
-   */
-  @Deprecated
-  public void setProfilingEnabled(boolean profilingEnabled) {
-    if (getProfilesSampleRate() == null) {
-      setProfilesSampleRate(profilingEnabled ? 1.0 : null);
-    }
   }
 
   /**
@@ -1610,7 +1743,7 @@ public class SentryOptions {
 
   /**
    * Sets the profilesSampleRate. Can be anything between 0.0 and 1.0 or null (default), to disable
-   * it. It’s dependent on the {{@link SentryOptions#setTracesSampleRate(Double)} } If a transaction
+   * it. It's dependent on the {{@link SentryOptions#setTracesSampleRate(Double)} } If a transaction
    * is sampled, then a profile could be sampled with a probability given by profilesSampleRate.
    *
    * @param profilesSampleRate the sample rate
@@ -1641,42 +1774,6 @@ public class SentryOptions {
   /**
    * Returns a list of origins to which `sentry-trace` header should be sent in HTTP integrations.
    *
-   * @deprecated use {{@link SentryOptions#getTracePropagationTargets()} }
-   * @return the list of origins
-   */
-  @Deprecated
-  @SuppressWarnings("InlineMeSuggester")
-  public @NotNull List<String> getTracingOrigins() {
-    return getTracePropagationTargets();
-  }
-
-  /**
-   * Adds an origin to which `sentry-trace` header should be sent in HTTP integrations.
-   *
-   * @deprecated use {{@link SentryOptions#setTracePropagationTargets(List)}}
-   * @param tracingOrigin - the tracing origin
-   */
-  @Deprecated
-  @SuppressWarnings("InlineMeSuggester")
-  public void addTracingOrigin(final @NotNull String tracingOrigin) {
-    if (tracePropagationTargets == null) {
-      tracePropagationTargets = new CopyOnWriteArrayList<>();
-    }
-    if (!tracingOrigin.isEmpty()) {
-      tracePropagationTargets.add(tracingOrigin);
-    }
-  }
-
-  @Deprecated
-  @SuppressWarnings("InlineMeSuggester")
-  @ApiStatus.Internal
-  public void setTracingOrigins(final @Nullable List<String> tracingOrigins) {
-    setTracePropagationTargets(tracingOrigins);
-  }
-
-  /**
-   * Returns a list of origins to which `sentry-trace` header should be sent in HTTP integrations.
-   *
    * @return the list of targets
    */
   public @NotNull List<String> getTracePropagationTargets() {
@@ -1689,7 +1786,7 @@ public class SentryOptions {
   @ApiStatus.Internal
   public void setTracePropagationTargets(final @Nullable List<String> tracePropagationTargets) {
     if (tracePropagationTargets == null) {
-      this.tracePropagationTargets = tracePropagationTargets;
+      this.tracePropagationTargets = null;
     } else {
       @NotNull final List<String> filteredTracePropagationTargets = new ArrayList<>();
       for (String target : tracePropagationTargets) {
@@ -1718,6 +1815,31 @@ public class SentryOptions {
    */
   public void setProguardUuid(final @Nullable String proguardUuid) {
     this.proguardUuid = proguardUuid;
+  }
+
+  /**
+   * Adds a bundle ID (also known as debugId) representing a source bundle that contains sources for
+   * this application. These sources will be used to source code for frames of an exceptions stack
+   * trace.
+   *
+   * @param bundleId Bundle ID generated by sentry-cli or the sentry-android-gradle-plugin
+   */
+  public void addBundleId(final @Nullable String bundleId) {
+    if (bundleId != null) {
+      final @NotNull String trimmedBundleId = bundleId.trim();
+      if (!trimmedBundleId.isEmpty()) {
+        this.bundleIds.add(trimmedBundleId);
+      }
+    }
+  }
+
+  /**
+   * Returns all configured bundle IDs referencing source code bundles.
+   *
+   * @return list of bundle IDs
+   */
+  public @NotNull Set<String> getBundleIds() {
+    return bundleIds;
   }
 
   /**
@@ -1799,12 +1921,16 @@ public class SentryOptions {
   /**
    * Sets the instrumenter used for performance instrumentation.
    *
-   * <p>If you set this to something other than {{@link Instrumenter#SENTRY}} Sentry will not create
+   * <p>If you set this to something other than {@link Instrumenter#SENTRY} Sentry will not create
    * any transactions automatically nor will it create transactions if you call
    * startTransaction(...), nor will it create child spans if you call startChild(...)
    *
    * @param instrumenter - the instrumenter to use
+   * @deprecated this should no longer be needed with our current OpenTelmetry integration. Use
+   *     {@link SentryOptions#setIgnoredSpanOrigins(List)} instead if you need fine grained control
+   *     over what integrations can create spans.
    */
+  @Deprecated
   public void setInstrumenter(final @NotNull Instrumenter instrumenter) {
     this.instrumenter = instrumenter;
   }
@@ -1844,6 +1970,23 @@ public class SentryOptions {
   }
 
   /**
+   * Returns a DebugMetaLoader to load sentry-debug-meta.properties containing ProGuard UUID, source
+   * bundle IDs etc.
+   *
+   * @return a loader or no-op
+   */
+  @ApiStatus.Internal
+  public @NotNull IDebugMetaLoader getDebugMetaLoader() {
+    return debugMetaLoader;
+  }
+
+  @ApiStatus.Internal
+  public void setDebugMetaLoader(final @Nullable IDebugMetaLoader debugMetaLoader) {
+    this.debugMetaLoader =
+        debugMetaLoader != null ? debugMetaLoader : NoOpDebugMetaLoader.getInstance();
+  }
+
+  /**
    * Returns a list of all {@link GestureTargetLocator} instances used to determine which {@link
    * io.sentry.internal.gestures.UiElement} was part of an user interaction.
    *
@@ -1862,6 +2005,531 @@ public class SentryOptions {
   public void setGestureTargetLocators(@NotNull final List<GestureTargetLocator> locators) {
     gestureTargetLocators.clear();
     gestureTargetLocators.addAll(locators);
+  }
+
+  /**
+   * Returns a list of all {@link ViewHierarchyExporter} instances used to export view hierarchy
+   * information.
+   *
+   * @return a list of {@link ViewHierarchyExporter}
+   */
+  @NotNull
+  public final List<ViewHierarchyExporter> getViewHierarchyExporters() {
+    return viewHierarchyExporters;
+  }
+
+  /**
+   * Sets the list of {@link ViewHierarchyExporter} being used to export the view hierarchy.
+   *
+   * @param exporters a list of {@link ViewHierarchyExporter}
+   */
+  public void setViewHierarchyExporters(@NotNull final List<ViewHierarchyExporter> exporters) {
+    viewHierarchyExporters.clear();
+    viewHierarchyExporters.addAll(exporters);
+  }
+
+  public @NotNull IThreadChecker getThreadChecker() {
+    return threadChecker;
+  }
+
+  public void setThreadChecker(final @NotNull IThreadChecker threadChecker) {
+    this.threadChecker = threadChecker;
+  }
+
+  /**
+   * Gets the performance collector used to collect performance stats while transactions run.
+   *
+   * @return the performance collector.
+   */
+  @ApiStatus.Internal
+  public @NotNull TransactionPerformanceCollector getTransactionPerformanceCollector() {
+    return transactionPerformanceCollector;
+  }
+
+  /**
+   * Sets the performance collector used to collect performance stats while transactions run.
+   *
+   * @param transactionPerformanceCollector the performance collector.
+   */
+  @ApiStatus.Internal
+  public void setTransactionPerformanceCollector(
+      final @NotNull TransactionPerformanceCollector transactionPerformanceCollector) {
+    this.transactionPerformanceCollector = transactionPerformanceCollector;
+  }
+
+  /**
+   * Gets if the time-to-full-display spans is tracked in navigation transactions.
+   *
+   * @return if the time-to-full-display is tracked.
+   */
+  public boolean isEnableTimeToFullDisplayTracing() {
+    return enableTimeToFullDisplayTracing;
+  }
+
+  /**
+   * Sets if the time-to-full-display spans should be tracked in navigation transactions.
+   *
+   * @param enableTimeToFullDisplayTracing if the time-to-full-display spans should be tracked.
+   */
+  public void setEnableTimeToFullDisplayTracing(final boolean enableTimeToFullDisplayTracing) {
+    this.enableTimeToFullDisplayTracing = enableTimeToFullDisplayTracing;
+  }
+
+  /**
+   * Gets the reporter to call when a screen is fully loaded, used for time-to-full-display spans.
+   *
+   * @return The reporter to call when a screen is fully loaded.
+   */
+  @ApiStatus.Internal
+  public @NotNull FullyDisplayedReporter getFullyDisplayedReporter() {
+    return fullyDisplayedReporter;
+  }
+
+  @ApiStatus.Internal
+  @TestOnly
+  public void setFullyDisplayedReporter(
+      final @NotNull FullyDisplayedReporter fullyDisplayedReporter) {
+    this.fullyDisplayedReporter = fullyDisplayedReporter;
+  }
+
+  /**
+   * Whether OPTIONS requests should be traced.
+   *
+   * @return true if OPTIONS requests should be traced
+   */
+  public boolean isTraceOptionsRequests() {
+    return traceOptionsRequests;
+  }
+
+  /**
+   * Whether OPTIONS requests should be traced.
+   *
+   * @param traceOptionsRequests true if OPTIONS requests should be traced
+   */
+  public void setTraceOptionsRequests(boolean traceOptionsRequests) {
+    this.traceOptionsRequests = traceOptionsRequests;
+  }
+
+  /**
+   * Whether Sentry is enabled.
+   *
+   * @return true if Sentry should be enabled
+   */
+  public boolean isEnabled() {
+    return enabled;
+  }
+
+  /**
+   * Whether Sentry should be enabled.
+   *
+   * @param enabled true if Sentry should be enabled
+   */
+  public void setEnabled(boolean enabled) {
+    this.enabled = enabled;
+  }
+
+  /**
+   * Whether to format serialized data, e.g. events logged to console in debug mode
+   *
+   * @return true if data should be pretty printed
+   */
+  public boolean isEnablePrettySerializationOutput() {
+    return enablePrettySerializationOutput;
+  }
+
+  /**
+   * Whether to send modules containing information about versions.
+   *
+   * @return true if modules should be sent.
+   */
+  public boolean isSendModules() {
+    return sendModules;
+  }
+
+  /**
+   * Whether to format serialized data, e.g. events logged to console in debug mode
+   *
+   * @param enablePrettySerializationOutput true if output should be pretty printed
+   */
+  public void setEnablePrettySerializationOutput(boolean enablePrettySerializationOutput) {
+    this.enablePrettySerializationOutput = enablePrettySerializationOutput;
+  }
+
+  /**
+   * Whether to profile app launches, depending on profilesSampler or profilesSampleRate. Depends on
+   * {@link SentryOptions#isProfilingEnabled()}
+   *
+   * @return true if app launches should be profiled.
+   */
+  public boolean isEnableAppStartProfiling() {
+    return isProfilingEnabled() && enableAppStartProfiling;
+  }
+
+  /**
+   * Whether to profile app launches, depending on profilesSampler or profilesSampleRate.
+   *
+   * @param enableAppStartProfiling true if app launches should be profiled.
+   */
+  public void setEnableAppStartProfiling(boolean enableAppStartProfiling) {
+    this.enableAppStartProfiling = enableAppStartProfiling;
+  }
+
+  /**
+   * Whether to send modules containing information about versions.
+   *
+   * @param sendModules true if modules should be sent.
+   */
+  public void setSendModules(boolean sendModules) {
+    this.sendModules = sendModules;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable List<FilterString> getIgnoredSpanOrigins() {
+    return ignoredSpanOrigins;
+  }
+
+  @ApiStatus.Experimental
+  public void addIgnoredSpanOrigin(String ignoredSpanOrigin) {
+    if (ignoredSpanOrigins == null) {
+      ignoredSpanOrigins = new ArrayList<>();
+    }
+    ignoredSpanOrigins.add(new FilterString(ignoredSpanOrigin));
+  }
+
+  @ApiStatus.Experimental
+  public void setIgnoredSpanOrigins(final @Nullable List<String> ignoredSpanOrigins) {
+    if (ignoredSpanOrigins == null) {
+      this.ignoredSpanOrigins = null;
+    } else {
+      @NotNull final List<FilterString> filtered = new ArrayList<>();
+      for (String origin : ignoredSpanOrigins) {
+        if (origin != null && !origin.isEmpty()) {
+          filtered.add(new FilterString(origin));
+        }
+      }
+
+      this.ignoredSpanOrigins = filtered;
+    }
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable List<FilterString> getIgnoredCheckIns() {
+    return ignoredCheckIns;
+  }
+
+  @ApiStatus.Experimental
+  public void addIgnoredCheckIn(String ignoredCheckIn) {
+    if (ignoredCheckIns == null) {
+      ignoredCheckIns = new ArrayList<>();
+    }
+    ignoredCheckIns.add(new FilterString(ignoredCheckIn));
+  }
+
+  @ApiStatus.Experimental
+  public void setIgnoredCheckIns(final @Nullable List<String> ignoredCheckIns) {
+    if (ignoredCheckIns == null) {
+      this.ignoredCheckIns = null;
+    } else {
+      @NotNull final List<FilterString> filteredIgnoredCheckIns = new ArrayList<>();
+      for (String slug : ignoredCheckIns) {
+        if (!slug.isEmpty()) {
+          filteredIgnoredCheckIns.add(new FilterString(slug));
+        }
+      }
+
+      this.ignoredCheckIns = filteredIgnoredCheckIns;
+    }
+  }
+
+  public @Nullable List<FilterString> getIgnoredTransactions() {
+    return ignoredTransactions;
+  }
+
+  @ApiStatus.Experimental
+  public void addIgnoredTransaction(String ignoredTransaction) {
+    if (ignoredTransactions == null) {
+      ignoredTransactions = new ArrayList<>();
+    }
+    ignoredTransactions.add(new FilterString(ignoredTransaction));
+  }
+
+  @ApiStatus.Experimental
+  public void setIgnoredTransactions(final @Nullable List<String> ignoredTransactions) {
+    if (ignoredTransactions == null) {
+      this.ignoredTransactions = null;
+    } else {
+      @NotNull final List<FilterString> filtered = new ArrayList<>();
+      for (String transactionName : ignoredTransactions) {
+        if (transactionName != null && !transactionName.isEmpty()) {
+          filtered.add(new FilterString(transactionName));
+        }
+      }
+
+      this.ignoredTransactions = filtered;
+    }
+  }
+
+  /** Returns the current {@link SentryDateProvider} that is used to retrieve the current date. */
+  @ApiStatus.Internal
+  public @NotNull SentryDateProvider getDateProvider() {
+    return dateProvider.getValue();
+  }
+
+  /**
+   * Sets the {@link SentryDateProvider} which is used to retrieve the current date.
+   *
+   * <p>Different providers offer different precision. By default Sentry tries to offer the highest
+   * precision available for the system.
+   */
+  @ApiStatus.Internal
+  public void setDateProvider(final @NotNull SentryDateProvider dateProvider) {
+    this.dateProvider.setValue(dateProvider);
+  }
+
+  /**
+   * Adds a ICollector.
+   *
+   * @param collector the ICollector.
+   */
+  @ApiStatus.Internal
+  public void addPerformanceCollector(final @NotNull IPerformanceCollector collector) {
+    performanceCollectors.add(collector);
+  }
+
+  /**
+   * Returns the list of ICollectors.
+   *
+   * @return the IPerformanceCollector list.
+   */
+  @ApiStatus.Internal
+  public @NotNull List<IPerformanceCollector> getPerformanceCollectors() {
+    return performanceCollectors;
+  }
+
+  @NotNull
+  public IConnectionStatusProvider getConnectionStatusProvider() {
+    return connectionStatusProvider;
+  }
+
+  public void setConnectionStatusProvider(
+      final @NotNull IConnectionStatusProvider connectionStatusProvider) {
+    this.connectionStatusProvider = connectionStatusProvider;
+  }
+
+  @ApiStatus.Internal
+  @NotNull
+  public IBackpressureMonitor getBackpressureMonitor() {
+    return backpressureMonitor;
+  }
+
+  @ApiStatus.Internal
+  public void setBackpressureMonitor(final @NotNull IBackpressureMonitor backpressureMonitor) {
+    this.backpressureMonitor = backpressureMonitor;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableBackpressureHandling(final boolean enableBackpressureHandling) {
+    this.enableBackpressureHandling = enableBackpressureHandling;
+  }
+
+  /**
+   * Returns the rate the profiler will sample rates at. 100 hz means 100 traces in 1 second.
+   *
+   * @return Rate the profiler will sample rates at.
+   */
+  @ApiStatus.Internal
+  public int getProfilingTracesHz() {
+    return profilingTracesHz;
+  }
+
+  /** Sets the rate the profiler will sample rates at. 100 hz means 100 traces in 1 second. */
+  @ApiStatus.Internal
+  public void setProfilingTracesHz(final int profilingTracesHz) {
+    this.profilingTracesHz = profilingTracesHz;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isEnableBackpressureHandling() {
+    return enableBackpressureHandling;
+  }
+
+  @ApiStatus.Internal
+  public long getSessionFlushTimeoutMillis() {
+    return sessionFlushTimeoutMillis;
+  }
+
+  @ApiStatus.Internal
+  public void setSessionFlushTimeoutMillis(final long sessionFlushTimeoutMillis) {
+    this.sessionFlushTimeoutMillis = sessionFlushTimeoutMillis;
+  }
+
+  @ApiStatus.Internal
+  @Nullable
+  public BeforeEnvelopeCallback getBeforeEnvelopeCallback() {
+    return beforeEnvelopeCallback;
+  }
+
+  @ApiStatus.Internal
+  public void setBeforeEnvelopeCallback(
+      @Nullable final BeforeEnvelopeCallback beforeEnvelopeCallback) {
+    this.beforeEnvelopeCallback = beforeEnvelopeCallback;
+  }
+
+  @ApiStatus.Experimental
+  @Nullable
+  public String getSpotlightConnectionUrl() {
+    return spotlightConnectionUrl;
+  }
+
+  @ApiStatus.Experimental
+  public void setSpotlightConnectionUrl(final @Nullable String spotlightConnectionUrl) {
+    this.spotlightConnectionUrl = spotlightConnectionUrl;
+  }
+
+  @ApiStatus.Experimental
+  public boolean isEnableSpotlight() {
+    return enableSpotlight;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableSpotlight(final boolean enableSpotlight) {
+    this.enableSpotlight = enableSpotlight;
+  }
+
+  public boolean isEnableScopePersistence() {
+    return enableScopePersistence;
+  }
+
+  public void setEnableScopePersistence(final boolean enableScopePersistence) {
+    this.enableScopePersistence = enableScopePersistence;
+  }
+
+  public @Nullable Cron getCron() {
+    return cron;
+  }
+
+  @ApiStatus.Experimental
+  public void setCron(@Nullable Cron cron) {
+    this.cron = cron;
+  }
+
+  @NotNull
+  public ExperimentalOptions getExperimental() {
+    return experimental;
+  }
+
+  public @NotNull ReplayController getReplayController() {
+    return replayController;
+  }
+
+  public void setReplayController(final @Nullable ReplayController replayController) {
+    this.replayController =
+        replayController != null ? replayController : NoOpReplayController.getInstance();
+  }
+
+  @ApiStatus.Experimental
+  public boolean isEnableScreenTracking() {
+    return enableScreenTracking;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableScreenTracking(final boolean enableScreenTracking) {
+    this.enableScreenTracking = enableScreenTracking;
+  }
+
+  public void setDefaultScopeType(final @NotNull ScopeType scopeType) {
+    this.defaultScopeType = scopeType;
+  }
+
+  public @NotNull ScopeType getDefaultScopeType() {
+    return defaultScopeType;
+  }
+
+  @ApiStatus.Internal
+  public void setInitPriority(final @NotNull InitPriority initPriority) {
+    this.initPriority = initPriority;
+  }
+
+  @ApiStatus.Internal
+  public @NotNull InitPriority getInitPriority() {
+    return initPriority;
+  }
+
+  /**
+   * If set to true a call to Sentry.init (or SentryAndroid.init) will go through and replace
+   * previous options if there are any.
+   *
+   * <p>By default the SDK will check whether a previous call to Sentry.init has higher priority
+   * than the current one and decide whether to actually perform the init and replace options.
+   *
+   * @param forceInit true = replace previous init and options
+   */
+  public void setForceInit(final boolean forceInit) {
+    this.forceInit = forceInit;
+  }
+
+  public boolean isForceInit() {
+    return forceInit;
+  }
+
+  /**
+   * If set to true, automatic scope forking will be disabled. If set to false, scopes will be
+   * forked automatically, e.g. when scopes are accessed on a thread for the first time, pushScope
+   * is invoked, in some cases when we explicitly want to fork the root scopes, etc.
+   *
+   * <p>If this is set to something other than `null`, it will take precedence over what is passed
+   * to Sentry.init.
+   *
+   * <p>Enabling this is intended for mobile and desktop apps, not backends. For Android the default
+   * value passed to Sentry.init is true (globalHubMode enabled), for backends it defaults to false.
+   *
+   * @param globalHubMode true = automatic scope forking is disabled
+   */
+  public void setGlobalHubMode(final @Nullable Boolean globalHubMode) {
+    this.globalHubMode = globalHubMode;
+  }
+
+  public @Nullable Boolean isGlobalHubMode() {
+    return globalHubMode;
+  }
+
+  /**
+   * Configures the SDK to either automatically determine if OpenTelemetry is available, whether to
+   * use it and what way to use it in.
+   *
+   * <p>See {@link SentryOpenTelemetryMode}
+   *
+   * <p>By default the SDK will use OpenTelemetry if available, preferring the agent. On Android
+   * OpenTelemetry is not used.
+   *
+   * @param openTelemetryMode the mode
+   */
+  public void setOpenTelemetryMode(final @NotNull SentryOpenTelemetryMode openTelemetryMode) {
+    this.openTelemetryMode = openTelemetryMode;
+  }
+
+  public @NotNull SentryOpenTelemetryMode getOpenTelemetryMode() {
+    return openTelemetryMode;
+  }
+
+  @NotNull
+  public SentryReplayOptions getSessionReplay() {
+    return sessionReplay;
+  }
+
+  public void setSessionReplay(final @NotNull SentryReplayOptions sessionReplayOptions) {
+    this.sessionReplay = sessionReplayOptions;
+  }
+
+  /**
+   * Load the lazy fields. Useful to load in the background, so that results are already cached. DO
+   * NOT CALL THIS METHOD ON THE MAIN THREAD.
+   */
+  void loadLazyFields() {
+    getSerializer();
+    retrieveParsedDsn();
+    getEnvelopeReader();
+    getDateProvider();
   }
 
   /** The BeforeSend callback */
@@ -1891,6 +2559,23 @@ public class SentryOptions {
      */
     @Nullable
     SentryTransaction execute(@NotNull SentryTransaction transaction, @NotNull Hint hint);
+  }
+
+  /** The BeforeSendReplay callback */
+  public interface BeforeSendReplayCallback {
+
+    /**
+     * Mutate or drop a replay event before being sent. Note that there might be many replay events
+     * for a single replay (i.e. segments), you can check {@link SentryReplayEvent#getReplayId()} to
+     * identify that the segments belong to the same replay.
+     *
+     * @param event the event
+     * @param hint the hint, contains {@link ReplayRecording}, can be accessed via {@link
+     *     Hint#getReplayRecording()}
+     * @return the original event or the mutated event or null if event was dropped
+     */
+    @Nullable
+    SentryReplayEvent execute(@NotNull SentryReplayEvent event, @NotNull Hint hint);
   }
 
   /** The BeforeBreadcrumb callback */
@@ -1935,14 +2620,42 @@ public class SentryOptions {
     Double sample(@NotNull SamplingContext samplingContext);
   }
 
+  /** The BeforeEnvelope callback */
+  @ApiStatus.Internal
+  public interface BeforeEnvelopeCallback {
+
+    /**
+     * A callback which gets called right before an envelope is about to be sent
+     *
+     * @param envelope the envelope
+     * @param hint the hints
+     */
+    void execute(@NotNull SentryEnvelope envelope, @Nullable Hint hint);
+  }
+
+  /** The BeforeEmitMetric callback */
+  @ApiStatus.Experimental
+  public interface BeforeEmitMetricCallback {
+
+    /**
+     * A callback which gets called right before a metric is about to be emitted.
+     *
+     * @param key the metric key
+     * @param tags the metric tags
+     * @return true if the metric should be emitted, false otherwise
+     */
+    boolean execute(@NotNull String key, @Nullable Map<String, String> tags);
+  }
+
   /**
    * Creates SentryOptions instance without initializing any of the internal parts.
    *
-   * <p>Used by {@link NoOpHub}.
+   * <p>Used by {@link NoOpScopes}.
    *
    * @return SentryOptions
    */
-  static @NotNull SentryOptions empty() {
+  @ApiStatus.Internal
+  public static @NotNull SentryOptions empty() {
     return new SentryOptions(true);
   }
 
@@ -1957,7 +2670,11 @@ public class SentryOptions {
    * @param empty if options should be empty.
    */
   private SentryOptions(final boolean empty) {
+    final @NotNull SdkVersion sdkVersion = createSdkVersion();
+    experimental = new ExperimentalOptions(empty, sdkVersion);
+    sessionReplay = new SentryReplayOptions(empty, sdkVersion);
     if (!empty) {
+      setSpanFactory(SpanFactoryFactory.create(new LoadClass(), NoOpLogger.getInstance()));
       // SentryExecutorService should be initialized before any
       // SendCachedEventFireAndForgetIntegration
       executorService = new SentryExecutorService();
@@ -1967,6 +2684,7 @@ public class SentryOptions {
       integrations.add(new UncaughtExceptionHandlerIntegration());
 
       integrations.add(new ShutdownHookIntegration());
+      integrations.add(new SpotlightIntegration());
 
       eventProcessors.add(new MainEventProcessor(this));
       eventProcessors.add(new DuplicateEventDetectionEventProcessor(this));
@@ -1976,7 +2694,8 @@ public class SentryOptions {
       }
 
       setSentryClientName(BuildConfig.SENTRY_JAVA_SDK_NAME + "/" + BuildConfig.VERSION_NAME);
-      setSdkVersion(createSdkVersion());
+      setSdkVersion(sdkVersion);
+      addPackageInfo();
     }
   }
 
@@ -2026,6 +2745,9 @@ public class SentryOptions {
     if (options.getSendClientReports() != null) {
       setSendClientReports(options.getSendClientReports());
     }
+    if (options.isForceInit() != null) {
+      setForceInit(options.isForceInit());
+    }
     final Map<String, String> tags = new HashMap<>(options.getTags());
     for (final Map.Entry<String, String> tag : tags.entrySet()) {
       this.tags.put(tag.getKey(), tag.getValue());
@@ -2057,6 +2779,72 @@ public class SentryOptions {
     if (options.getIdleTimeout() != null) {
       setIdleTimeout(options.getIdleTimeout());
     }
+    for (String bundleId : options.getBundleIds()) {
+      addBundleId(bundleId);
+    }
+
+    if (options.isEnabled() != null) {
+      setEnabled(options.isEnabled());
+    }
+    if (options.isEnablePrettySerializationOutput() != null) {
+      setEnablePrettySerializationOutput(options.isEnablePrettySerializationOutput());
+    }
+
+    if (options.isSendModules() != null) {
+      setSendModules(options.isSendModules());
+    }
+    if (options.getIgnoredCheckIns() != null) {
+      final List<String> ignoredCheckIns = new ArrayList<>(options.getIgnoredCheckIns());
+      setIgnoredCheckIns(ignoredCheckIns);
+    }
+    if (options.getIgnoredTransactions() != null) {
+      final List<String> ignoredTransactions = new ArrayList<>(options.getIgnoredTransactions());
+      setIgnoredTransactions(ignoredTransactions);
+    }
+    if (options.isEnableBackpressureHandling() != null) {
+      setEnableBackpressureHandling(options.isEnableBackpressureHandling());
+    }
+    if (options.getMaxRequestBodySize() != null) {
+      setMaxRequestBodySize(options.getMaxRequestBodySize());
+    }
+    if (options.isSendDefaultPii() != null) {
+      setSendDefaultPii(options.isSendDefaultPii());
+    }
+
+    if (options.isEnableSpotlight() != null) {
+      setEnableSpotlight(options.isEnableSpotlight());
+    }
+
+    if (options.getSpotlightConnectionUrl() != null) {
+      setSpotlightConnectionUrl(options.getSpotlightConnectionUrl());
+    }
+
+    if (options.isGlobalHubMode() != null) {
+      setGlobalHubMode(options.isGlobalHubMode());
+    }
+
+    if (options.getCron() != null) {
+      if (getCron() == null) {
+        setCron(options.getCron());
+      } else {
+        if (options.getCron().getDefaultCheckinMargin() != null) {
+          getCron().setDefaultCheckinMargin(options.getCron().getDefaultCheckinMargin());
+        }
+        if (options.getCron().getDefaultMaxRuntime() != null) {
+          getCron().setDefaultMaxRuntime(options.getCron().getDefaultMaxRuntime());
+        }
+        if (options.getCron().getDefaultTimezone() != null) {
+          getCron().setDefaultTimezone(options.getCron().getDefaultTimezone());
+        }
+        if (options.getCron().getDefaultFailureIssueThreshold() != null) {
+          getCron()
+              .setDefaultFailureIssueThreshold(options.getCron().getDefaultFailureIssueThreshold());
+        }
+        if (options.getCron().getDefaultRecoveryThreshold() != null) {
+          getCron().setDefaultRecoveryThreshold(options.getCron().getDefaultRecoveryThreshold());
+        }
+      }
+    }
   }
 
   private @NotNull SdkVersion createSdkVersion() {
@@ -2064,9 +2852,23 @@ public class SentryOptions {
     final SdkVersion sdkVersion = new SdkVersion(BuildConfig.SENTRY_JAVA_SDK_NAME, version);
 
     sdkVersion.setVersion(version);
-    sdkVersion.addPackage("maven:io.sentry:sentry", version);
 
     return sdkVersion;
+  }
+
+  private void addPackageInfo() {
+    SentryIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.sentry:sentry", BuildConfig.VERSION_NAME);
+  }
+
+  @ApiStatus.Internal
+  public @NotNull ISpanFactory getSpanFactory() {
+    return spanFactory;
+  }
+
+  @ApiStatus.Internal
+  public void setSpanFactory(final @NotNull ISpanFactory spanFactory) {
+    this.spanFactory = spanFactory;
   }
 
   public static final class Proxy {
@@ -2074,24 +2876,39 @@ public class SentryOptions {
     private @Nullable String port;
     private @Nullable String user;
     private @Nullable String pass;
+    private @Nullable java.net.Proxy.Type type;
+
+    public Proxy() {
+      this(null, null, null, null, null);
+    }
+
+    public Proxy(@Nullable String host, @Nullable String port) {
+      this(host, port, null, null, null);
+    }
+
+    public Proxy(@Nullable String host, @Nullable String port, @Nullable java.net.Proxy.Type type) {
+      this(host, port, type, null, null);
+    }
 
     public Proxy(
         final @Nullable String host,
         final @Nullable String port,
         final @Nullable String user,
         final @Nullable String pass) {
+      this(host, port, null, user, pass);
+    }
+
+    public Proxy(
+        final @Nullable String host,
+        final @Nullable String port,
+        final @Nullable java.net.Proxy.Type type,
+        final @Nullable String user,
+        final @Nullable String pass) {
       this.host = host;
       this.port = port;
+      this.type = type;
       this.user = user;
       this.pass = pass;
-    }
-
-    public Proxy() {
-      this(null, null, null, null);
-    }
-
-    public Proxy(@Nullable String host, @Nullable String port) {
-      this(host, port, null, null);
     }
 
     public @Nullable String getHost() {
@@ -2124,6 +2941,62 @@ public class SentryOptions {
 
     public void setPass(final @Nullable String pass) {
       this.pass = pass;
+    }
+
+    public @Nullable java.net.Proxy.Type getType() {
+      return type;
+    }
+
+    public void setType(final @Nullable java.net.Proxy.Type type) {
+      this.type = type;
+    }
+  }
+
+  public static final class Cron {
+    private @Nullable Long defaultCheckinMargin;
+    private @Nullable Long defaultMaxRuntime;
+    private @Nullable String defaultTimezone;
+    private @Nullable Long defaultFailureIssueThreshold;
+    private @Nullable Long defaultRecoveryThreshold;
+
+    public @Nullable Long getDefaultCheckinMargin() {
+      return defaultCheckinMargin;
+    }
+
+    public void setDefaultCheckinMargin(@Nullable Long defaultCheckinMargin) {
+      this.defaultCheckinMargin = defaultCheckinMargin;
+    }
+
+    public @Nullable Long getDefaultMaxRuntime() {
+      return defaultMaxRuntime;
+    }
+
+    public void setDefaultMaxRuntime(@Nullable Long defaultMaxRuntime) {
+      this.defaultMaxRuntime = defaultMaxRuntime;
+    }
+
+    public @Nullable String getDefaultTimezone() {
+      return defaultTimezone;
+    }
+
+    public void setDefaultTimezone(@Nullable String defaultTimezone) {
+      this.defaultTimezone = defaultTimezone;
+    }
+
+    public @Nullable Long getDefaultFailureIssueThreshold() {
+      return defaultFailureIssueThreshold;
+    }
+
+    public void setDefaultFailureIssueThreshold(@Nullable Long defaultFailureIssueThreshold) {
+      this.defaultFailureIssueThreshold = defaultFailureIssueThreshold;
+    }
+
+    public @Nullable Long getDefaultRecoveryThreshold() {
+      return defaultRecoveryThreshold;
+    }
+
+    public void setDefaultRecoveryThreshold(@Nullable Long defaultRecoveryThreshold) {
+      this.defaultRecoveryThreshold = defaultRecoveryThreshold;
     }
   }
 

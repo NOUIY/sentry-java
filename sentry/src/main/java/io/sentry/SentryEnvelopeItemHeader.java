@@ -103,7 +103,7 @@ public final class SentryEnvelopeItemHeader implements JsonSerializable, JsonUnk
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (contentType != null) {
@@ -130,7 +130,7 @@ public final class SentryEnvelopeItemHeader implements JsonSerializable, JsonUnk
   public static final class Deserializer implements JsonDeserializer<SentryEnvelopeItemHeader> {
     @Override
     public @NotNull SentryEnvelopeItemHeader deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       reader.beginObject();
 
       String contentType = null;

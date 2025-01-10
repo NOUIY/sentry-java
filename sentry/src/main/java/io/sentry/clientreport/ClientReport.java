@@ -3,10 +3,10 @@ package io.sentry.clientreport;
 import io.sentry.DateUtils;
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.SentryLevel;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
@@ -55,7 +55,7 @@ public final class ClientReport implements JsonUnknown, JsonSerializable {
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
 
@@ -74,8 +74,8 @@ public final class ClientReport implements JsonUnknown, JsonSerializable {
 
   public static final class Deserializer implements JsonDeserializer<ClientReport> {
     @Override
-    public @NotNull ClientReport deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull ClientReport deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
       Date timestamp = null;
       List<DiscardedEvent> discardedEvents = new ArrayList<>();
       Map<String, Object> unknown = null;
@@ -89,7 +89,7 @@ public final class ClientReport implements JsonUnknown, JsonSerializable {
             break;
           case JsonKeys.DISCARDED_EVENTS:
             List<DiscardedEvent> deserializedDiscardedEvents =
-                reader.nextList(logger, new DiscardedEvent.Deserializer());
+                reader.nextListOrNull(logger, new DiscardedEvent.Deserializer());
             discardedEvents.addAll(deserializedDiscardedEvents);
             break;
           default:

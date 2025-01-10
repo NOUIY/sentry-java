@@ -5,6 +5,7 @@ plugins {
     id("com.android.library")
     kotlin("android")
     jacoco
+    id(Config.QualityPlugins.jacocoAndroid)
     id(Config.QualityPlugins.errorProne)
     id(Config.QualityPlugins.gradleVersions)
 }
@@ -64,12 +65,6 @@ android {
     }
 }
 
-tasks.withType<Test> {
-    configure<JacocoTaskExtension> {
-        isIncludeNoLocationClasses = false
-    }
-}
-
 tasks.withType<JavaCompile>().configureEach {
     options.errorprone {
         check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
@@ -81,7 +76,9 @@ dependencies {
     api(projects.sentry)
     compileOnly(projects.sentryAndroidFragment)
     compileOnly(projects.sentryAndroidTimber)
+    compileOnly(projects.sentryAndroidReplay)
     compileOnly(projects.sentryCompose)
+    compileOnly(projects.sentryComposeHelper)
 
     // lifecycle processor, session tracking
     implementation(Config.Libs.lifecycleProcess)
@@ -108,6 +105,10 @@ dependencies {
     testImplementation(projects.sentryTestSupport)
     testImplementation(projects.sentryAndroidFragment)
     testImplementation(projects.sentryAndroidTimber)
+    testImplementation(projects.sentryAndroidReplay)
+    testImplementation(projects.sentryComposeHelper)
+    testImplementation(projects.sentryAndroidNdk)
+    testRuntimeOnly(Config.Libs.composeUi)
     testRuntimeOnly(Config.Libs.timber)
     testRuntimeOnly(Config.Libs.fragment)
 }

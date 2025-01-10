@@ -9,9 +9,13 @@ import androidx.test.espresso.idling.CountingIdlingResource
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.runner.AndroidJUnitRunner
 import io.sentry.Sentry
+import io.sentry.Sentry.OptionsConfiguration
 import io.sentry.android.core.SentryAndroid
 import io.sentry.android.core.SentryAndroidOptions
+import io.sentry.test.applyTestOptions
+import io.sentry.test.initForTest
 import io.sentry.uitest.android.mockservers.MockRelay
+import java.io.FileInputStream
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -39,6 +43,17 @@ abstract class BaseUiTest {
     /** Mock relay server that receives all envelopes sent during the test. */
     protected val relay = MockRelay(false, relayIdlingResource)
 
+    private fun disableDontKeepActivities() {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val pfd = automation.executeShellCommand("settings put global always_finish_activities 0")
+        try {
+            FileInputStream(pfd.fileDescriptor).readBytes()
+        } catch (e: Throwable) {
+            // ignored
+        }
+        pfd.close()
+    }
+
     @BeforeTest
     fun baseSetUp() {
         runner = InstrumentationRegistry.getInstrumentation() as AndroidJUnitRunner
@@ -47,6 +62,7 @@ abstract class BaseUiTest {
         context.cacheDir.deleteRecursively()
         relay.start()
         mockDsn = relay.createMockDsn()
+        disableDontKeepActivities()
     }
 
     @AfterTest
@@ -64,14 +80,16 @@ abstract class BaseUiTest {
      */
     protected fun initSentry(
         relayWaitForRequests: Boolean = false,
+        context: Context = this.context,
         optionsConfiguration: ((options: SentryAndroidOptions) -> Unit)? = null
     ) {
         relay.waitForRequests = relayWaitForRequests
         if (relayWaitForRequests) {
             IdlingRegistry.getInstance().register(relayIdlingResource)
         }
-        SentryAndroid.init(context) {
+        initForTest(context) {
             it.dsn = mockDsn
+            it.isDebug = true
             // We don't use test orchestrator, due to problems with Saucelabs.
             // So the app data is not deleted between tests. Thus, We don't know when sessions will actually be sent.
             // To avoid any interference between tests we can just disable them by default.
@@ -85,4 +103,21 @@ abstract class BaseUiTest {
 fun waitUntilIdle() {
     // We rely on Espresso's idling resources.
     Espresso.onIdle()
+}
+
+fun classExists(className: String): Boolean {
+    try {
+        Class.forName(className)
+        return true
+    } catch (exception: ClassNotFoundException) {
+        // no-op
+    }
+    return false
+}
+
+fun initForTest(context: Context, optionsConfiguration: OptionsConfiguration<SentryAndroidOptions>) {
+    SentryAndroid.init(context) {
+        applyTestOptions(it)
+        optionsConfiguration.configure(it)
+    }
 }

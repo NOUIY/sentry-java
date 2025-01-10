@@ -2,10 +2,10 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -73,7 +73,7 @@ public final class DebugMeta implements JsonUnknown, JsonSerializable {
   // JsonSerializable
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (sdkInfo != null) {
@@ -95,7 +95,7 @@ public final class DebugMeta implements JsonUnknown, JsonSerializable {
 
   public static final class Deserializer implements JsonDeserializer<DebugMeta> {
     @Override
-    public @NotNull DebugMeta deserialize(@NotNull JsonObjectReader reader, @NotNull ILogger logger)
+    public @NotNull DebugMeta deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
         throws Exception {
 
       DebugMeta debugMeta = new DebugMeta();
@@ -109,7 +109,7 @@ public final class DebugMeta implements JsonUnknown, JsonSerializable {
             debugMeta.sdkInfo = reader.nextOrNull(logger, new SdkInfo.Deserializer());
             break;
           case JsonKeys.IMAGES:
-            debugMeta.images = reader.nextList(logger, new DebugImage.Deserializer());
+            debugMeta.images = reader.nextListOrNull(logger, new DebugImage.Deserializer());
             break;
           default:
             if (unknown == null) {

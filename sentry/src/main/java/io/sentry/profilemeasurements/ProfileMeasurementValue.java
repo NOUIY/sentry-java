@@ -2,14 +2,14 @@ package io.sentry.profilemeasurements;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
+import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
@@ -29,6 +29,14 @@ public final class ProfileMeasurementValue implements JsonUnknown, JsonSerializa
   public ProfileMeasurementValue(final @NotNull Long relativeStartNs, final @NotNull Number value) {
     this.relativeStartNs = relativeStartNs.toString();
     this.value = value.doubleValue();
+  }
+
+  public double getValue() {
+    return value;
+  }
+
+  public @NotNull String getRelativeStartNs() {
+    return relativeStartNs;
   }
 
   @Override
@@ -54,7 +62,7 @@ public final class ProfileMeasurementValue implements JsonUnknown, JsonSerializa
   }
 
   @Override
-  public void serialize(final @NotNull JsonObjectWriter writer, final @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     writer.name(JsonKeys.VALUE).value(logger, value);
@@ -84,7 +92,7 @@ public final class ProfileMeasurementValue implements JsonUnknown, JsonSerializa
 
     @Override
     public @NotNull ProfileMeasurementValue deserialize(
-        final @NotNull JsonObjectReader reader, final @NotNull ILogger logger) throws Exception {
+        final @NotNull ObjectReader reader, final @NotNull ILogger logger) throws Exception {
       reader.beginObject();
       ProfileMeasurementValue data = new ProfileMeasurementValue();
       Map<String, Object> unknown = null;

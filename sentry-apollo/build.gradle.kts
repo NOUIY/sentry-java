@@ -24,7 +24,7 @@ dependencies {
     api(projects.sentry)
     api(projects.sentryKotlinExtensions)
 
-    implementation(Config.Libs.apolloAndroid)
+    compileOnly(Config.Libs.apolloAndroid)
 
     compileOnly(Config.CompileOnly.nopen)
     errorprone(Config.CompileOnly.nopenChecker)
@@ -39,8 +39,9 @@ dependencies {
     testImplementation(Config.TestLibs.kotlinTestJunit)
     testImplementation(Config.TestLibs.mockitoKotlin)
     testImplementation(Config.TestLibs.mockitoInline)
-    testImplementation(Config.TestLibs.mockWebserver4)
+    testImplementation(Config.TestLibs.mockWebserver)
     testImplementation(Config.Libs.apolloCoroutines)
+    testImplementation(Config.Libs.apolloAndroid)
 }
 
 configure<SourceSetContainer> {
@@ -77,4 +78,11 @@ tasks.withType<JavaCompile>().configureEach {
         check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
         option("NullAway:AnnotatedPackages", "io.sentry")
     }
+}
+
+buildConfig {
+    useJavaOutput()
+    packageName("io.sentry.apollo")
+    buildConfigField("String", "SENTRY_APOLLO_SDK_NAME", "\"${Config.Sentry.SENTRY_APOLLO_SDK_NAME}\"")
+    buildConfigField("String", "VERSION_NAME", "\"${project.version}\"")
 }

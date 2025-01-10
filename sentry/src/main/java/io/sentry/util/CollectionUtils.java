@@ -34,7 +34,8 @@ public final class CollectionUtils {
   }
 
   /**
-   * Creates a new {@link ConcurrentHashMap} as a shallow copy of map given by parameter.
+   * Creates a new {@link ConcurrentHashMap} as a shallow copy of map given by parameter. Also makes
+   * sure no null keys or values are put into the resulting {@link ConcurrentHashMap}.
    *
    * @param map the map to copy
    * @param <K> the type of map keys
@@ -44,7 +45,14 @@ public final class CollectionUtils {
   public static <K, V> @Nullable Map<K, @NotNull V> newConcurrentHashMap(
       @Nullable Map<K, @NotNull V> map) {
     if (map != null) {
-      return new ConcurrentHashMap<>(map);
+      Map<K, @NotNull V> concurrentMap = new ConcurrentHashMap<>();
+
+      for (Map.Entry<K, V> entry : map.entrySet()) {
+        if (entry.getKey() != null && entry.getValue() != null) {
+          concurrentMap.put(entry.getKey(), entry.getValue());
+        }
+      }
+      return concurrentMap;
     } else {
       return null;
     }
@@ -113,11 +121,44 @@ public final class CollectionUtils {
    */
   public static @NotNull <T, R> List<R> map(
       final @NotNull List<T> list, final @NotNull Mapper<T, R> f) {
-    List<R> mappedList = new ArrayList<>();
+    List<R> mappedList = new ArrayList<>(list.size());
     for (T t : list) {
       mappedList.add(f.map(t));
     }
     return mappedList;
+  }
+
+  /**
+   * Returns a new list which entries match a predicate specified by a parameter.
+   *
+   * @param predicate - the predicate
+   * @return a new list
+   */
+  public static @NotNull <T> List<T> filterListEntries(
+      final @NotNull List<T> list, final @NotNull Predicate<T> predicate) {
+    final List<T> filteredList = new ArrayList<>(list.size());
+    for (final T entry : list) {
+      if (predicate.test(entry)) {
+        filteredList.add(entry);
+      }
+    }
+    return filteredList;
+  }
+
+  /**
+   * Returns true if the element is present in the array, false otherwise.
+   *
+   * @param array - the array
+   * @param element - the element
+   * @return true if the element is present in the array, false otherwise.
+   */
+  public static <T> boolean contains(final @NotNull T[] array, final @NotNull T element) {
+    for (final T t : array) {
+      if (element.equals(t)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

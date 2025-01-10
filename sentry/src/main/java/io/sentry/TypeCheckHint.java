@@ -10,6 +10,9 @@ public final class TypeCheckHint {
   @ApiStatus.Internal
   public static final String SENTRY_IS_FROM_HYBRID_SDK = "sentry:isFromHybridSdk";
 
+  @ApiStatus.Internal
+  public static final String SENTRY_EVENT_DROP_REASON = "sentry:eventDropReason";
+
   @ApiStatus.Internal public static final String SENTRY_JAVASCRIPT_SDK_NAME = "sentry.javascript";
 
   @ApiStatus.Internal public static final String SENTRY_DOTNET_SDK_NAME = "sentry.dotnet";
@@ -36,6 +39,9 @@ public final class TypeCheckHint {
   /** Used for Navigation breadrcrumbs. */
   public static final String ANDROID_NAV_DESTINATION = "android:navigationDestination";
 
+  /** Used for Network breadrcrumbs. */
+  public static final String ANDROID_NETWORK_CAPABILITIES = "android:networkCapabilities";
+
   /** Used for OkHttp response breadcrumbs. */
   public static final String OKHTTP_RESPONSE = "okHttp:response";
   /** Used for OkHttp Request breadcrumbs. */
@@ -48,6 +54,9 @@ public final class TypeCheckHint {
 
   /** Used for GraphQl handler exceptions. */
   public static final String GRAPHQL_HANDLER_PARAMETERS = "graphql:handlerParameters";
+
+  /** Used for GraphQl data fetcher breadcrumbs. */
+  public static final String GRAPHQL_DATA_FETCHING_ENVIRONMENT = "graphql:dataFetchingEnvironment";
 
   /** Used for JUL breadcrumbs. */
   public static final String JUL_LOG_RECORD = "jul:logRecord";
@@ -91,6 +100,9 @@ public final class TypeCheckHint {
       "webFluxExceptionHandler:response";
   /** Used for Spring WebFlux exception handler. */
   public static final String WEBFLUX_EXCEPTION_HANDLER_REQUEST = "webFluxExceptionHandler:request";
+  /** Used for Spring WebFlux exception handler. */
+  public static final String WEBFLUX_EXCEPTION_HANDLER_EXCHANGE =
+      "webFluxExceptionHandler:exchange";
 
   /** Used for Spring WebFlux filter breadcrumbs. */
   public static final String WEBFLUX_FILTER_RESPONSE = "webFluxFilter:response";

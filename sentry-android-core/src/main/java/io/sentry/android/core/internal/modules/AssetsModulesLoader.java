@@ -3,6 +3,7 @@ package io.sentry.android.core.internal.modules;
 import android.content.Context;
 import io.sentry.ILogger;
 import io.sentry.SentryLevel;
+import io.sentry.android.core.ContextUtils;
 import io.sentry.internal.modules.ModulesLoader;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -19,15 +20,14 @@ public final class AssetsModulesLoader extends ModulesLoader {
 
   public AssetsModulesLoader(final @NotNull Context context, final @NotNull ILogger logger) {
     super(logger);
-    this.context = context;
+    this.context = ContextUtils.getApplicationContext(context);
   }
 
   @Override
   protected Map<String, String> loadModules() {
     final Map<String, String> modules = new TreeMap<>();
 
-    try {
-      final InputStream stream = context.getAssets().open(EXTERNAL_MODULES_FILENAME);
+    try (final InputStream stream = context.getAssets().open(EXTERNAL_MODULES_FILENAME)) {
       return parseStream(stream);
     } catch (FileNotFoundException e) {
       logger.log(SentryLevel.INFO, "%s file was not found.", EXTERNAL_MODULES_FILENAME);

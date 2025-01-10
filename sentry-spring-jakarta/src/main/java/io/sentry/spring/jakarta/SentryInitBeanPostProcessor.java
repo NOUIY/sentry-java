@@ -2,10 +2,10 @@ package io.sentry.spring.jakarta;
 
 import com.jakewharton.nopen.annotation.Open;
 import io.sentry.EventProcessor;
-import io.sentry.HubAdapter;
-import io.sentry.IHub;
+import io.sentry.IScopes;
 import io.sentry.ITransportFactory;
 import io.sentry.Integration;
+import io.sentry.ScopesAdapter;
 import io.sentry.Sentry;
 import io.sentry.SentryOptions;
 import io.sentry.SentryOptions.TracesSamplerCallback;
@@ -27,15 +27,15 @@ public class SentryInitBeanPostProcessor
     implements BeanPostProcessor, ApplicationContextAware, DisposableBean {
   private @Nullable ApplicationContext applicationContext;
 
-  private final @NotNull IHub hub;
+  private final @NotNull IScopes scopes;
 
   public SentryInitBeanPostProcessor() {
-    this(HubAdapter.getInstance());
+    this(ScopesAdapter.getInstance());
   }
 
-  SentryInitBeanPostProcessor(final @NotNull IHub hub) {
-    Objects.requireNonNull(hub, "hub is required");
-    this.hub = hub;
+  SentryInitBeanPostProcessor(final @NotNull IScopes scopes) {
+    Objects.requireNonNull(scopes, "Scopes are required");
+    this.scopes = scopes;
   }
 
   @Override
@@ -56,8 +56,8 @@ public class SentryInitBeanPostProcessor
             .getBeanProvider(SentryOptions.BeforeSendCallback.class)
             .ifAvailable(options::setBeforeSend);
         applicationContext
-          .getBeanProvider(SentryOptions.BeforeSendTransactionCallback.class)
-          .ifAvailable(options::setBeforeSendTransaction);
+            .getBeanProvider(SentryOptions.BeforeSendTransactionCallback.class)
+            .ifAvailable(options::setBeforeSendTransaction);
         applicationContext
             .getBeanProvider(SentryOptions.BeforeBreadcrumbCallback.class)
             .ifAvailable(options::setBeforeBreadcrumb);
@@ -86,6 +86,6 @@ public class SentryInitBeanPostProcessor
 
   @Override
   public void destroy() {
-    hub.close();
+    scopes.close();
   }
 }

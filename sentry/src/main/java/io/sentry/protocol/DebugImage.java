@@ -2,10 +2,10 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.HashMap;
@@ -50,6 +50,7 @@ import org.jetbrains.annotations.Nullable;
  */
 public final class DebugImage implements JsonUnknown, JsonSerializable {
   public static final String PROGUARD = "proguard";
+  public static final String JVM = "jvm";
 
   /**
    * The unique UUID of the image.
@@ -270,7 +271,7 @@ public final class DebugImage implements JsonUnknown, JsonSerializable {
   // JsonSerializable
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (uuid != null) {
@@ -313,8 +314,8 @@ public final class DebugImage implements JsonUnknown, JsonSerializable {
 
   public static final class Deserializer implements JsonDeserializer<DebugImage> {
     @Override
-    public @NotNull DebugImage deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull DebugImage deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
 
       DebugImage debugImage = new DebugImage();
       Map<String, Object> unknown = null;

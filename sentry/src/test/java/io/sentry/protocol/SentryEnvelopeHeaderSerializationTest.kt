@@ -1,12 +1,16 @@
 package io.sentry.protocol
 
+import io.sentry.DateUtils
 import io.sentry.FileFromResources
 import io.sentry.ILogger
 import io.sentry.JsonObjectReader
 import io.sentry.JsonObjectWriter
 import io.sentry.JsonSerializable
 import io.sentry.SentryEnvelopeHeader
+import io.sentry.SentryIntegrationPackageStorage
 import io.sentry.TraceContextSerializationTest
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 import java.io.StringReader
@@ -22,9 +26,21 @@ class SentryEnvelopeHeaderSerializationTest {
             SentryIdSerializationTest.Fixture().getSut(),
             SdkVersionSerializationTest.Fixture().getSut(),
             TraceContextSerializationTest.Fixture().getSut()
-        )
+        ).apply {
+            sentAt = DateUtils.getDateTime("2020-02-07T14:16:00.000Z")
+        }
     }
     private val fixture = Fixture()
+
+    @Before
+    fun setup() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
+
+    @After
+    fun teardown() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
 
     @Test
     fun serialize() {

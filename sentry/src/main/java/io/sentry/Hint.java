@@ -1,5 +1,6 @@
 package io.sentry;
 
+import io.sentry.util.AutoClosableReentrantLock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -27,7 +28,11 @@ public final class Hint {
 
   private final @NotNull Map<String, Object> internalStorage = new HashMap<String, Object>();
   private final @NotNull List<Attachment> attachments = new ArrayList<>();
+  private final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
   private @Nullable Attachment screenshot = null;
+  private @Nullable Attachment viewHierarchy = null;
+  private @Nullable Attachment threadDump = null;
+  private @Nullable ReplayRecording replayRecording = null;
 
   public static @NotNull Hint withAttachment(@Nullable Attachment attachment) {
     @NotNull final Hint hint = new Hint();
@@ -41,30 +46,37 @@ public final class Hint {
     return hint;
   }
 
-  public synchronized void set(@NotNull String name, @Nullable Object hint) {
-    internalStorage.put(name, hint);
-  }
-
-  public synchronized @Nullable Object get(@NotNull String name) {
-    return internalStorage.get(name);
-  }
-
-  @SuppressWarnings("unchecked")
-  public synchronized <T extends Object> @Nullable T getAs(
-      @NotNull String name, @NotNull Class<T> clazz) {
-    Object hintValue = internalStorage.get(name);
-
-    if (clazz.isInstance(hintValue)) {
-      return (T) hintValue;
-    } else if (isCastablePrimitive(hintValue, clazz)) {
-      return (T) hintValue;
-    } else {
-      return null;
+  public void set(@NotNull String name, @Nullable Object hint) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
+      internalStorage.put(name, hint);
     }
   }
 
-  public synchronized void remove(@NotNull String name) {
-    internalStorage.remove(name);
+  public @Nullable Object get(@NotNull String name) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
+      return internalStorage.get(name);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  public <T extends Object> @Nullable T getAs(@NotNull String name, @NotNull Class<T> clazz) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
+      Object hintValue = internalStorage.get(name);
+
+      if (clazz.isInstance(hintValue)) {
+        return (T) hintValue;
+      } else if (isCastablePrimitive(hintValue, clazz)) {
+        return (T) hintValue;
+      } else {
+        return null;
+      }
+    }
+  }
+
+  public void remove(@NotNull String name) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
+      internalStorage.remove(name);
+    }
   }
 
   public void addAttachment(@Nullable Attachment attachment) {
@@ -98,13 +110,15 @@ public final class Hint {
    * referenced.
    */
   @ApiStatus.Internal
-  public synchronized void clear() {
-    final Iterator<Map.Entry<String, Object>> iterator = internalStorage.entrySet().iterator();
+  public void clear() {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
+      final Iterator<Map.Entry<String, Object>> iterator = internalStorage.entrySet().iterator();
 
-    while (iterator.hasNext()) {
-      final Map.Entry<String, Object> entry = iterator.next();
-      if (entry.getKey() == null || !entry.getKey().startsWith("sentry:")) {
-        iterator.remove();
+      while (iterator.hasNext()) {
+        final Map.Entry<String, Object> entry = iterator.next();
+        if (entry.getKey() == null || !entry.getKey().startsWith("sentry:")) {
+          iterator.remove();
+        }
       }
     }
   }
@@ -115,6 +129,31 @@ public final class Hint {
 
   public @Nullable Attachment getScreenshot() {
     return screenshot;
+  }
+
+  public void setViewHierarchy(final @Nullable Attachment viewHierarchy) {
+    this.viewHierarchy = viewHierarchy;
+  }
+
+  public @Nullable Attachment getViewHierarchy() {
+    return viewHierarchy;
+  }
+
+  public void setThreadDump(final @Nullable Attachment threadDump) {
+    this.threadDump = threadDump;
+  }
+
+  public @Nullable Attachment getThreadDump() {
+    return threadDump;
+  }
+
+  @Nullable
+  public ReplayRecording getReplayRecording() {
+    return replayRecording;
+  }
+
+  public void setReplayRecording(final @Nullable ReplayRecording replayRecording) {
+    this.replayRecording = replayRecording;
   }
 
   private boolean isCastablePrimitive(@Nullable Object hintValue, @NotNull Class<?> clazz) {

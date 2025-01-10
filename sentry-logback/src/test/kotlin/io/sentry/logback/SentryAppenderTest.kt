@@ -8,10 +8,12 @@ import ch.qos.logback.core.encoder.Encoder
 import ch.qos.logback.core.encoder.EncoderBase
 import ch.qos.logback.core.status.Status
 import io.sentry.ITransportFactory
+import io.sentry.InitPriority
 import io.sentry.Sentry
 import io.sentry.SentryLevel
 import io.sentry.SentryOptions
 import io.sentry.checkEvent
+import io.sentry.test.initForTest
 import io.sentry.transport.ITransport
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
@@ -35,18 +37,20 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SentryAppenderTest {
-    private class Fixture(dsn: String? = "http://key@localhost/proj", minimumBreadcrumbLevel: Level? = null, minimumEventLevel: Level? = null, contextTags: List<String>? = null, encoder: Encoder<ILoggingEvent>? = null) {
+    private class Fixture(dsn: String? = "http://key@localhost/proj", minimumBreadcrumbLevel: Level? = null, minimumEventLevel: Level? = null, contextTags: List<String>? = null, encoder: Encoder<ILoggingEvent>? = null, sendDefaultPii: Boolean = false, options: SentryOptions = SentryOptions(), startLater: Boolean = false) {
         val logger: Logger = LoggerFactory.getLogger(SentryAppenderTest::class.java)
         val loggerContext = LoggerFactory.getILoggerFactory() as LoggerContext
         val transportFactory = mock<ITransportFactory>()
         val transport = mock<ITransport>()
         val utcTimeZone: ZoneId = ZoneId.of("UTC")
+        val appender = SentryAppender()
+        var encoder: Encoder<ILoggingEvent>? = null
 
         init {
             whenever(this.transportFactory.create(any(), any())).thenReturn(transport)
-            val appender = SentryAppender()
-            val options = SentryOptions()
+            this.encoder = encoder
             options.dsn = dsn
+            options.isSendDefaultPii = sendDefaultPii
             contextTags?.forEach { options.addContextTag(it) }
             appender.setOptions(options)
             appender.setMinimumBreadcrumbLevel(minimumBreadcrumbLevel)
@@ -58,6 +62,12 @@ class SentryAppenderTest {
             val rootLogger = loggerContext.getLogger(Logger.ROOT_LOGGER_NAME)
             rootLogger.level = Level.TRACE
             rootLogger.addAppender(appender)
+            if (!startLater) {
+                start()
+            }
+        }
+
+        fun start() {
             appender.start()
             encoder?.start()
             loggerContext.start()
@@ -76,21 +86,32 @@ class SentryAppenderTest {
     @BeforeTest
     fun `clear MDC`() {
         MDC.clear()
+        Sentry.close()
     }
 
     @Test
-    fun `does not initialize Sentry if Sentry is already enabled`() {
-        fixture = Fixture()
-        Sentry.init {
+    fun `does not initialize Sentry if Sentry is already enabled with higher prio`() {
+        fixture = Fixture(
+            startLater = true,
+            options = SentryOptions().also {
+                it.setTag("only-present-if-logger-init-was-run", "another-value")
+            }
+        )
+        initForTest {
             it.dsn = "http://key@localhost/proj"
             it.environment = "manual-environment"
             it.setTransportFactory(fixture.transportFactory)
+            it.setTag("tag-from-first-init", "some-value")
+            it.isEnableBackpressureHandling = false
+            it.initPriority = InitPriority.LOW
         }
+        fixture.start()
+
         fixture.logger.error("testing environment field")
 
         verify(fixture.transport).send(
             checkEvent { event ->
-                assertEquals("manual-environment", event.environment)
+                assertNull(event.tags?.get("only-present-if-logger-init-was-run"))
             },
             anyOrNull()
         )
@@ -118,14 +139,35 @@ class SentryAppenderTest {
     fun `encodes message`() {
         var encoder = PatternLayoutEncoder()
         encoder.pattern = "encoderadded %msg"
-        fixture = Fixture(minimumEventLevel = Level.DEBUG, encoder = encoder)
-        fixture.logger.info("testing encoding")
+        fixture = Fixture(minimumEventLevel = Level.DEBUG, encoder = encoder, sendDefaultPii = true)
+        fixture.logger.info("testing encoding {}", "param1")
 
         verify(fixture.transport).send(
             checkEvent { event ->
                 assertNotNull(event.message) { message ->
-                    assertEquals("encoderadded testing encoding", message.formatted)
-                    assertEquals("testing encoding", message.message)
+                    assertEquals("encoderadded testing encoding param1", message.formatted)
+                    assertEquals("testing encoding {}", message.message)
+                    assertEquals(listOf("param1"), message.params)
+                }
+                assertEquals("io.sentry.logback.SentryAppenderTest", event.logger)
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `if encoder is set treats raw message and params as PII`() {
+        var encoder = PatternLayoutEncoder()
+        encoder.pattern = "encoderadded %msg"
+        fixture = Fixture(minimumEventLevel = Level.DEBUG, encoder = encoder, sendDefaultPii = false)
+        fixture.logger.info("testing encoding {}", "param1")
+
+        verify(fixture.transport).send(
+            checkEvent { event ->
+                assertNotNull(event.message) { message ->
+                    assertEquals("encoderadded testing encoding param1", message.formatted)
+                    assertNull(message.message)
+                    assertNull(message.params)
                 }
                 assertEquals("io.sentry.logback.SentryAppenderTest", event.logger)
             },
@@ -151,7 +193,7 @@ class SentryAppenderTest {
     @Test
     fun `fallsback when encoder throws`() {
         var encoder = ThrowingEncoder()
-        fixture = Fixture(minimumEventLevel = Level.DEBUG, encoder = encoder)
+        fixture = Fixture(minimumEventLevel = Level.DEBUG, encoder = encoder, sendDefaultPii = true)
         fixture.logger.info("testing when encoder throws")
 
         verify(fixture.transport).send(
@@ -246,6 +288,22 @@ class SentryAppenderTest {
         verify(fixture.transport).send(
             checkEvent { event ->
                 assertEquals(SentryLevel.ERROR, event.level)
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `converts error log level to Sentry level with exception`() {
+        fixture = Fixture(minimumEventLevel = Level.ERROR)
+        fixture.logger.error("testing error level", RuntimeException("test exc"))
+
+        verify(fixture.transport).send(
+            checkEvent { event ->
+                assertEquals(SentryLevel.ERROR, event.level)
+                val exception = event.exceptions!!.first()
+                assertEquals(SentryAppender.MECHANISM_TYPE, exception.mechanism!!.type)
+                assertEquals("test exc", exception.value)
             },
             anyOrNull()
         )
@@ -368,13 +426,13 @@ class SentryAppenderTest {
                 assertNotNull(event.sdk) {
                     assertEquals(BuildConfig.SENTRY_LOGBACK_SDK_NAME, it.name)
                     assertEquals(BuildConfig.VERSION_NAME, it.version)
-                    assertNotNull(it.packages)
                     assertTrue(
-                        it.packages!!.any { pkg ->
+                        it.packageSet.any { pkg ->
                             "maven:io.sentry:sentry-logback" == pkg.name &&
                                 BuildConfig.VERSION_NAME == pkg.version
                         }
                     )
+                    assertTrue(it.integrationSet.contains("Logback"))
                 }
             },
             anyOrNull()

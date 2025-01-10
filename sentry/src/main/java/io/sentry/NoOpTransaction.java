@@ -4,7 +4,6 @@ import io.sentry.protocol.Contexts;
 import io.sentry.protocol.SentryId;
 import io.sentry.protocol.TransactionNameSource;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
@@ -44,10 +43,32 @@ public final class NoOpTransaction implements ITransaction {
 
   @Override
   public @NotNull ISpan startChild(
+      @NotNull String operation, @Nullable String description, @NotNull SpanOptions spanOptions) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull SpanContext spanContext, @NotNull SpanOptions spanOptions) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
       @NotNull String operation,
       @Nullable String description,
-      @Nullable Date timestamp,
+      @Nullable SentryDate timestamp,
       @NotNull Instrumenter instrumenter) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull String operation,
+      @Nullable String description,
+      @Nullable SentryDate timestamp,
+      @NotNull Instrumenter instrumenter,
+      @NotNull SpanOptions spanOptions) {
     return NoOpSpan.getInstance();
   }
 
@@ -68,7 +89,13 @@ public final class NoOpTransaction implements ITransaction {
   }
 
   @Override
-  public @Nullable Span getLatestActiveSpan() {
+  public @NotNull ISpan startChild(
+      @NotNull String operation, @Nullable String description, @Nullable SentryDate timestamp) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @Nullable ISpan getLatestActiveSpan() {
     return null;
   }
 
@@ -78,7 +105,23 @@ public final class NoOpTransaction implements ITransaction {
   }
 
   @Override
+  public @NotNull ISentryLifecycleToken makeCurrent() {
+    return NoOpScopesLifecycleToken.getInstance();
+  }
+
+  @Override
   public void scheduleFinish() {}
+
+  @Override
+  public void forceFinish(
+      @NotNull SpanStatus status, boolean dropIfNoChildren, @Nullable Hint hint) {}
+
+  @Override
+  public void finish(
+      @Nullable SpanStatus status,
+      @Nullable SentryDate timestamp,
+      boolean dropIfNoChildren,
+      @Nullable Hint hint) {}
 
   @Override
   public boolean isFinished() {
@@ -107,8 +150,7 @@ public final class NoOpTransaction implements ITransaction {
   public void finish(@Nullable SpanStatus status) {}
 
   @Override
-  @ApiStatus.Internal
-  public void finish(@Nullable SpanStatus status, @Nullable Date timestamp) {}
+  public void finish(@Nullable SpanStatus status, @Nullable SentryDate timestamp) {}
 
   @Override
   public void setOperation(@NotNull String operation) {}
@@ -188,6 +230,21 @@ public final class NoOpTransaction implements ITransaction {
   @Override
   public @NotNull Contexts getContexts() {
     return new Contexts();
+  }
+
+  @Override
+  public boolean updateEndDate(final @NotNull SentryDate date) {
+    return false;
+  }
+
+  @Override
+  public @NotNull SentryDate getStartDate() {
+    return new SentryNanotimeDate();
+  }
+
+  @Override
+  public @NotNull SentryDate getFinishDate() {
+    return new SentryNanotimeDate();
   }
 
   @Override

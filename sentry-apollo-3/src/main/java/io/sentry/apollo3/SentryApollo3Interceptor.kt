@@ -10,6 +10,9 @@ import com.apollographql.apollo3.api.Subscription
 import com.apollographql.apollo3.api.variables
 import com.apollographql.apollo3.interceptor.ApolloInterceptor
 import com.apollographql.apollo3.interceptor.ApolloInterceptorChain
+import io.sentry.apollo3.SentryApollo3HttpInterceptor.Companion.SENTRY_APOLLO_3_OPERATION_TYPE
+import io.sentry.apollo3.SentryApollo3HttpInterceptor.Companion.SENTRY_APOLLO_3_VARIABLES
+import io.sentry.vendor.Base64
 import kotlinx.coroutines.flow.Flow
 
 class SentryApollo3Interceptor : ApolloInterceptor {
@@ -19,11 +22,10 @@ class SentryApollo3Interceptor : ApolloInterceptor {
         chain: ApolloInterceptorChain
     ): Flow<ApolloResponse<D>> {
         val builder = request.newBuilder()
-            .addHttpHeader(SentryApollo3HttpInterceptor.SENTRY_APOLLO_3_OPERATION_TYPE, operationType(request))
-            .addHttpHeader(SentryApollo3HttpInterceptor.SENTRY_APOLLO_3_OPERATION_NAME, request.operation.name())
+            .addHttpHeader(SENTRY_APOLLO_3_OPERATION_TYPE, Base64.encodeToString(operationType(request).toByteArray(), Base64.NO_WRAP))
 
         request.scalarAdapters?.let {
-            builder.addHttpHeader(SentryApollo3HttpInterceptor.SENTRY_APOLLO_3_VARIABLES, request.operation.variables(it).valueMap.toString())
+            builder.addHttpHeader(SENTRY_APOLLO_3_VARIABLES, Base64.encodeToString(request.operation.variables(it).valueMap.toString().toByteArray(), Base64.NO_WRAP))
         }
         return chain.proceed(builder.build())
     }

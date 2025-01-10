@@ -1,11 +1,14 @@
 package io.sentry;
 
+import io.sentry.hints.AbnormalExit;
 import io.sentry.hints.Cached;
 import io.sentry.protocol.DebugImage;
 import io.sentry.protocol.DebugMeta;
+import io.sentry.protocol.SdkVersion;
 import io.sentry.protocol.SentryException;
 import io.sentry.protocol.SentryTransaction;
 import io.sentry.protocol.User;
+import io.sentry.util.AutoClosableReentrantLock;
 import io.sentry.util.HintUtils;
 import io.sentry.util.Objects;
 import java.io.Closeable;
@@ -22,23 +25,18 @@ import org.jetbrains.annotations.VisibleForTesting;
 @ApiStatus.Internal
 public final class MainEventProcessor implements EventProcessor, Closeable {
 
-  /**
-   * Default value for {@link SentryEvent#getEnvironment()} set when both event and {@link
-   * SentryOptions} do not have the environment field set.
-   */
-  private static final String DEFAULT_ENVIRONMENT = "production";
-
   private final @NotNull SentryOptions options;
   private final @NotNull SentryThreadFactory sentryThreadFactory;
   private final @NotNull SentryExceptionFactory sentryExceptionFactory;
   private volatile @Nullable HostnameCache hostnameCache = null;
+  private final @NotNull AutoClosableReentrantLock hostnameCacheLock =
+      new AutoClosableReentrantLock();
 
   public MainEventProcessor(final @NotNull SentryOptions options) {
     this.options = Objects.requireNonNull(options, "The SentryOptions is required.");
 
     final SentryStackTraceFactory sentryStackTraceFactory =
-        new SentryStackTraceFactory(
-            this.options.getInAppExcludes(), this.options.getInAppIncludes());
+        new SentryStackTraceFactory(this.options);
 
     sentryExceptionFactory = new SentryExceptionFactory(sentryStackTraceFactory);
     sentryThreadFactory = new SentryThreadFactory(sentryStackTraceFactory, this.options);
@@ -70,24 +68,36 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
     return event;
   }
 
-  private void setDebugMeta(final @NotNull SentryEvent event) {
+  private void setDebugMeta(final @NotNull SentryBaseEvent event) {
+    final @NotNull List<DebugImage> debugImages = new ArrayList<>();
+
     if (options.getProguardUuid() != null) {
+      final DebugImage proguardMappingImage = new DebugImage();
+      proguardMappingImage.setType(DebugImage.PROGUARD);
+      proguardMappingImage.setUuid(options.getProguardUuid());
+      debugImages.add(proguardMappingImage);
+    }
+
+    for (final @NotNull String bundleId : options.getBundleIds()) {
+      final DebugImage sourceBundleImage = new DebugImage();
+      sourceBundleImage.setType(DebugImage.JVM);
+      sourceBundleImage.setDebugId(bundleId);
+      debugImages.add(sourceBundleImage);
+    }
+
+    if (!debugImages.isEmpty()) {
       DebugMeta debugMeta = event.getDebugMeta();
 
       if (debugMeta == null) {
         debugMeta = new DebugMeta();
       }
       if (debugMeta.getImages() == null) {
-        debugMeta.setImages(new ArrayList<>());
+        debugMeta.setImages(debugImages);
+      } else {
+        debugMeta.getImages().addAll(debugImages);
       }
-      List<DebugImage> images = debugMeta.getImages();
-      if (images != null) {
-        final DebugImage debugImage = new DebugImage();
-        debugImage.setType(DebugImage.PROGUARD);
-        debugImage.setUuid(options.getProguardUuid());
-        images.add(debugImage);
-        event.setDebugMeta(debugMeta);
-      }
+
+      event.setDebugMeta(debugMeta);
     }
   }
 
@@ -134,12 +144,32 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
   public @NotNull SentryTransaction process(
       final @NotNull SentryTransaction transaction, final @NotNull Hint hint) {
     setCommons(transaction);
+    setDebugMeta(transaction);
 
     if (shouldApplyScopeData(transaction, hint)) {
       processNonCachedEvent(transaction);
     }
 
     return transaction;
+  }
+
+  @Override
+  public @NotNull SentryReplayEvent process(
+      final @NotNull SentryReplayEvent event, final @NotNull Hint hint) {
+    setCommons(event);
+    // TODO: maybe later it's needed to deobfuscate something (e.g. view hierarchy), for now the
+    // TODO: protocol does not support it
+    // setDebugMeta(event);
+
+    if (shouldApplyScopeData(event, hint)) {
+      processNonCachedEvent(event);
+      final @Nullable SdkVersion replaySdkVersion = options.getSessionReplay().getSdkVersion();
+      if (replaySdkVersion != null) {
+        // we override the SdkVersion only for replay events as those may come from Hybrid SDKs
+        event.setSdk(replaySdkVersion);
+      }
+    }
+    return event;
   }
 
   private void setCommons(final @NotNull SentryBaseEvent event) {
@@ -161,8 +191,7 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
 
   private void setEnvironment(final @NotNull SentryBaseEvent event) {
     if (event.getEnvironment() == null) {
-      event.setEnvironment(
-          options.getEnvironment() != null ? options.getEnvironment() : DEFAULT_ENVIRONMENT);
+      event.setEnvironment(options.getEnvironment());
     }
   }
 
@@ -181,7 +210,7 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
 
   private void ensureHostnameCache() {
     if (hostnameCache == null) {
-      synchronized (this) {
+      try (final @NotNull ISentryLifecycleToken ignored = hostnameCacheLock.acquire()) {
         if (hostnameCache == null) {
           hostnameCache = HostnameCache.getInstance();
         }
@@ -214,14 +243,13 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
   }
 
   private void mergeUser(final @NotNull SentryBaseEvent event) {
-    if (options.isSendDefaultPii()) {
-      if (event.getUser() == null) {
-        final User user = new User();
-        user.setIpAddress(IpAddressUtils.DEFAULT_IP_ADDRESS);
-        event.setUser(user);
-      } else if (event.getUser().getIpAddress() == null) {
-        event.getUser().setIpAddress(IpAddressUtils.DEFAULT_IP_ADDRESS);
-      }
+    @Nullable User user = event.getUser();
+    if (user == null) {
+      user = new User();
+      event.setUser(user);
+    }
+    if (user.getIpAddress() == null) {
+      user.setIpAddress(IpAddressUtils.DEFAULT_IP_ADDRESS);
     }
   }
 
@@ -251,8 +279,16 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
         }
       }
 
-      if (options.isAttachThreads()) {
-        event.setThreads(sentryThreadFactory.getCurrentThreads(mechanismThreadIds));
+      // typically Abnormal exits can be tackled by looking at the thread dump (e.g. ANRs), hence
+      // we force attach threads regardless of the config
+      if (options.isAttachThreads() || HintUtils.hasType(hint, AbnormalExit.class)) {
+        final Object sentrySdkHint = HintUtils.getSentrySdkHint(hint);
+        boolean ignoreCurrentThread = false;
+        if (sentrySdkHint instanceof AbnormalExit) {
+          ignoreCurrentThread = ((AbnormalExit) sentrySdkHint).ignoreCurrentThread();
+        }
+        event.setThreads(
+            sentryThreadFactory.getCurrentThreads(mechanismThreadIds, ignoreCurrentThread));
       } else if (options.isAttachStacktrace()
           && (eventExceptions == null || eventExceptions.isEmpty())
           && !isCachedHint(hint)) {
@@ -293,5 +329,10 @@ public final class MainEventProcessor implements EventProcessor, Closeable {
   @Nullable
   HostnameCache getHostnameCache() {
     return hostnameCache;
+  }
+
+  @Override
+  public @Nullable Long getOrder() {
+    return 0L;
   }
 }

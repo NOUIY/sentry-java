@@ -1,11 +1,17 @@
+public final class io/sentry/servlet/BuildConfig {
+	public static final field SENTRY_SERVLET_SDK_NAME Ljava/lang/String;
+	public static final field VERSION_NAME Ljava/lang/String;
+}
+
 public class io/sentry/servlet/SentryServletContainerInitializer : javax/servlet/ServletContainerInitializer {
 	public fun <init> ()V
 	public fun onStartup (Ljava/util/Set;Ljavax/servlet/ServletContext;)V
 }
 
 public class io/sentry/servlet/SentryServletRequestListener : javax/servlet/ServletRequestListener {
+	public static final field SENTRY_SCOPE_LIFECYCLE_TOKEN_KEY Ljava/lang/String;
 	public fun <init> ()V
-	public fun <init> (Lio/sentry/IHub;)V
+	public fun <init> (Lio/sentry/IScopes;)V
 	public fun requestDestroyed (Ljavax/servlet/ServletRequestEvent;)V
 	public fun requestInitialized (Ljavax/servlet/ServletRequestEvent;)V
 }

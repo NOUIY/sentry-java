@@ -82,8 +82,6 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
    * and for making informed decisions on which frameworks to support in future development efforts.
    */
   private @Nullable Map<String, String> modules;
-  /** Meta data for event processing and debugging. */
-  private @Nullable DebugMeta debugMeta;
 
   SentryEvent(final @NotNull SentryId eventId, final @NotNull Date timestamp) {
     super(eventId);
@@ -112,6 +110,10 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
   @SuppressWarnings({"JdkObsolete", "JavaUtilDate"})
   public Date getTimestamp() {
     return (Date) timestamp.clone();
+  }
+
+  public void setTimestamp(final @NotNull Date timestamp) {
+    this.timestamp = timestamp;
   }
 
   public @Nullable Message getMessage() {
@@ -203,31 +205,26 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
     return null;
   }
 
-  public @Nullable DebugMeta getDebugMeta() {
-    return debugMeta;
-  }
-
-  public void setDebugMeta(final @Nullable DebugMeta debugMeta) {
-    this.debugMeta = debugMeta;
-  }
-
   /**
    * Returns true if any exception was unhandled by the user.
    *
    * @return true if its crashed or false otherwise
    */
   public boolean isCrashed() {
+    return getUnhandledException() != null;
+  }
+
+  public @Nullable SentryException getUnhandledException() {
     if (exception != null) {
       for (SentryException e : exception.getValues()) {
         if (e.getMechanism() != null
             && e.getMechanism().isHandled() != null
             && !e.getMechanism().isHandled()) {
-          return true;
+          return e;
         }
       }
     }
-
-    return false;
+    return null;
   }
 
   /**
@@ -251,11 +248,10 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
     public static final String TRANSACTION = "transaction";
     public static final String FINGERPRINT = "fingerprint";
     public static final String MODULES = "modules";
-    public static final String DEBUG_META = "debug_meta";
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     writer.name(JsonKeys.TIMESTAMP).value(logger, timestamp);
@@ -289,9 +285,6 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
     if (modules != null) {
       writer.name(JsonKeys.MODULES).value(logger, modules);
     }
-    if (debugMeta != null) {
-      writer.name(JsonKeys.DEBUG_META).value(logger, debugMeta);
-    }
     new SentryBaseEvent.Serializer().serialize(this, writer, logger);
     if (unknown != null) {
       for (String key : unknown.keySet()) {
@@ -318,8 +311,8 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
 
     @SuppressWarnings("unchecked")
     @Override
-    public @NotNull SentryEvent deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull SentryEvent deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
       reader.beginObject();
       SentryEvent event = new SentryEvent();
       Map<String, Object> unknown = null;
@@ -345,14 +338,15 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
             reader.beginObject();
             reader.nextName(); // SentryValues.JsonKeys.VALUES
             event.threads =
-                new SentryValues<>(reader.nextList(logger, new SentryThread.Deserializer()));
+                new SentryValues<>(reader.nextListOrNull(logger, new SentryThread.Deserializer()));
             reader.endObject();
             break;
           case JsonKeys.EXCEPTION:
             reader.beginObject();
             reader.nextName(); // SentryValues.JsonKeys.VALUES
             event.exception =
-                new SentryValues<>(reader.nextList(logger, new SentryException.Deserializer()));
+                new SentryValues<>(
+                    reader.nextListOrNull(logger, new SentryException.Deserializer()));
             reader.endObject();
             break;
           case JsonKeys.LEVEL:
@@ -371,9 +365,6 @@ public final class SentryEvent extends SentryBaseEvent implements JsonUnknown, J
             Map<String, String> deserializedModules =
                 (Map<String, String>) reader.nextObjectOrNull();
             event.modules = CollectionUtils.newConcurrentHashMap(deserializedModules);
-            break;
-          case JsonKeys.DEBUG_META:
-            event.debugMeta = reader.nextOrNull(logger, new DebugMeta.Deserializer());
             break;
           default:
             if (!baseEventDeserializer.deserializeValue(event, nextName, reader, logger)) {

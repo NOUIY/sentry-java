@@ -7,6 +7,7 @@ plugins {
     jacoco
     id(Config.QualityPlugins.errorProne)
     id(Config.QualityPlugins.gradleVersions)
+    id(Config.BuildPlugins.buildConfig) version Config.BuildPlugins.buildConfigVersion
 }
 
 configure<JavaPluginExtension> {
@@ -21,7 +22,8 @@ tasks.withType<KotlinCompile>().configureEach {
 
 dependencies {
     api(projects.sentry)
-    implementation(Config.Libs.graphQlJava)
+    api(projects.sentryGraphqlCore)
+    compileOnly(Config.Libs.graphQlJava)
 
     compileOnly(Config.CompileOnly.nopen)
     errorprone(Config.CompileOnly.nopenChecker)
@@ -35,8 +37,12 @@ dependencies {
     testImplementation(kotlin(Config.kotlinStdLib))
     testImplementation(Config.TestLibs.kotlinTestJunit)
     testImplementation(Config.TestLibs.mockitoKotlin)
+    testImplementation(Config.TestLibs.mockitoInline)
     testImplementation(Config.TestLibs.mockWebserver)
     testImplementation(Config.Libs.okhttp)
+    testImplementation(Config.Libs.springBootStarterGraphql)
+    testImplementation("com.netflix.graphql.dgs:graphql-error-types:4.9.2")
+    testImplementation(Config.Libs.graphQlJava)
 }
 
 configure<SourceSetContainer> {
@@ -73,4 +79,11 @@ tasks.withType<JavaCompile>().configureEach {
         check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
         option("NullAway:AnnotatedPackages", "io.sentry")
     }
+}
+
+buildConfig {
+    useJavaOutput()
+    packageName("io.sentry.graphql")
+    buildConfigField("String", "SENTRY_GRAPHQL_SDK_NAME", "\"${Config.Sentry.SENTRY_GRAPHQL_SDK_NAME}\"")
+    buildConfigField("String", "VERSION_NAME", "\"${project.version}\"")
 }

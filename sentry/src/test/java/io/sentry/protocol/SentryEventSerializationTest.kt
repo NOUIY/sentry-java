@@ -7,7 +7,10 @@ import io.sentry.JsonObjectReader
 import io.sentry.JsonObjectWriter
 import io.sentry.JsonSerializable
 import io.sentry.SentryEvent
+import io.sentry.SentryIntegrationPackageStorage
 import io.sentry.SentryLevel
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 import java.io.StringReader
@@ -37,11 +40,20 @@ class SentryEventSerializationTest {
             level = SentryLevel.ERROR
             transaction = "e7aea178-e3a6-46bc-be17-38a3ea8920b6"
             setModule("01c8a4f6-8861-4575-a10e-5ed3fba7c794", "b4083431-47e9-433a-b58f-58796f63e27c")
-            debugMeta = DebugMetaSerializationTest.Fixture().getSut()
             SentryBaseEventSerializationTest.Fixture().update(this)
         }
     }
     private val fixture = Fixture()
+
+    @Before
+    fun setup() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
+
+    @After
+    fun teardown() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
 
     @Test
     fun serialize() {

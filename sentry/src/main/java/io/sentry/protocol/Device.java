@@ -2,13 +2,15 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.util.CollectionUtils;
+import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -101,14 +103,6 @@ public final class Device implements JsonUnknown, JsonSerializable {
 
   private @Nullable String id;
 
-  /**
-   * This method returns the language code for this locale, which will either be the empty string or
-   * a lowercase ISO 639 code.
-   *
-   * @deprecated use {@link Device#getLocale()}
-   */
-  @Deprecated private @Nullable String language;
-
   /** The locale of the device. For example, en-US. */
   private @Nullable String locale;
 
@@ -116,6 +110,19 @@ public final class Device implements JsonUnknown, JsonSerializable {
 
   /** battery's temperature in celsius */
   private @Nullable Float batteryTemperature;
+
+  /** Optional. Number of "logical processors". For example, 8. */
+  private @Nullable Integer processorCount;
+
+  /**
+   * Optional. Processor frequency in MHz. Note that the actual CPU frequency might vary depending
+   * on current load and power conditions, especially on low-powered devices like phones and
+   * laptops.
+   */
+  private @Nullable Double processorFrequency;
+
+  /** Optional. CPU description. For example, Intel(R) Core(TM)2 Quad CPU Q6600 @ 2.40GHz. */
+  private @Nullable String cpuDescription;
 
   @SuppressWarnings("unused")
   private @Nullable Map<String, @NotNull Object> unknown;
@@ -147,7 +154,6 @@ public final class Device implements JsonUnknown, JsonSerializable {
     this.screenDpi = device.screenDpi;
     this.bootTime = device.bootTime;
     this.id = device.id;
-    this.language = device.language;
     this.connectionType = device.connectionType;
     this.batteryTemperature = device.batteryTemperature;
     this.batteryLevel = device.batteryLevel;
@@ -157,6 +163,10 @@ public final class Device implements JsonUnknown, JsonSerializable {
 
     final TimeZone timezoneRef = device.timezone;
     this.timezone = timezoneRef != null ? (TimeZone) timezoneRef.clone() : null;
+
+    this.processorCount = device.processorCount;
+    this.processorFrequency = device.processorFrequency;
+    this.cpuDescription = device.cpuDescription;
 
     this.unknown = CollectionUtils.newConcurrentHashMap(device.unknown);
   }
@@ -379,14 +389,6 @@ public final class Device implements JsonUnknown, JsonSerializable {
     this.id = id;
   }
 
-  public @Nullable String getLanguage() {
-    return language;
-  }
-
-  public void setLanguage(final @Nullable String language) {
-    this.language = language;
-  }
-
   public @Nullable String getConnectionType() {
     return connectionType;
   }
@@ -403,6 +405,109 @@ public final class Device implements JsonUnknown, JsonSerializable {
     this.batteryTemperature = batteryTemperature;
   }
 
+  public @Nullable Integer getProcessorCount() {
+    return processorCount;
+  }
+
+  public void setProcessorCount(@Nullable final Integer processorCount) {
+    this.processorCount = processorCount;
+  }
+
+  public @Nullable Double getProcessorFrequency() {
+    return processorFrequency;
+  }
+
+  public void setProcessorFrequency(@Nullable final Double processorFrequency) {
+    this.processorFrequency = processorFrequency;
+  }
+
+  public @Nullable String getCpuDescription() {
+    return cpuDescription;
+  }
+
+  public void setCpuDescription(@Nullable final String cpuDescription) {
+    this.cpuDescription = cpuDescription;
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    Device device = (Device) o;
+    return Objects.equals(name, device.name)
+        && Objects.equals(manufacturer, device.manufacturer)
+        && Objects.equals(brand, device.brand)
+        && Objects.equals(family, device.family)
+        && Objects.equals(model, device.model)
+        && Objects.equals(modelId, device.modelId)
+        && Arrays.equals(archs, device.archs)
+        && Objects.equals(batteryLevel, device.batteryLevel)
+        && Objects.equals(charging, device.charging)
+        && Objects.equals(online, device.online)
+        && orientation == device.orientation
+        && Objects.equals(simulator, device.simulator)
+        && Objects.equals(memorySize, device.memorySize)
+        && Objects.equals(freeMemory, device.freeMemory)
+        && Objects.equals(usableMemory, device.usableMemory)
+        && Objects.equals(lowMemory, device.lowMemory)
+        && Objects.equals(storageSize, device.storageSize)
+        && Objects.equals(freeStorage, device.freeStorage)
+        && Objects.equals(externalStorageSize, device.externalStorageSize)
+        && Objects.equals(externalFreeStorage, device.externalFreeStorage)
+        && Objects.equals(screenWidthPixels, device.screenWidthPixels)
+        && Objects.equals(screenHeightPixels, device.screenHeightPixels)
+        && Objects.equals(screenDensity, device.screenDensity)
+        && Objects.equals(screenDpi, device.screenDpi)
+        && Objects.equals(bootTime, device.bootTime)
+        && Objects.equals(id, device.id)
+        && Objects.equals(locale, device.locale)
+        && Objects.equals(connectionType, device.connectionType)
+        && Objects.equals(batteryTemperature, device.batteryTemperature)
+        && Objects.equals(processorCount, device.processorCount)
+        && Objects.equals(processorFrequency, device.processorFrequency)
+        && Objects.equals(cpuDescription, device.cpuDescription);
+  }
+
+  @Override
+  public int hashCode() {
+    int result =
+        Objects.hash(
+            name,
+            manufacturer,
+            brand,
+            family,
+            model,
+            modelId,
+            batteryLevel,
+            charging,
+            online,
+            orientation,
+            simulator,
+            memorySize,
+            freeMemory,
+            usableMemory,
+            lowMemory,
+            storageSize,
+            freeStorage,
+            externalStorageSize,
+            externalFreeStorage,
+            screenWidthPixels,
+            screenHeightPixels,
+            screenDensity,
+            screenDpi,
+            bootTime,
+            timezone,
+            id,
+            locale,
+            connectionType,
+            batteryTemperature,
+            processorCount,
+            processorFrequency,
+            cpuDescription);
+    result = 31 * result + Arrays.hashCode(archs);
+    return result;
+  }
+
   public enum DeviceOrientation implements JsonSerializable {
     PORTRAIT,
     LANDSCAPE;
@@ -410,7 +515,7 @@ public final class Device implements JsonUnknown, JsonSerializable {
     // JsonElementSerializer
 
     @Override
-    public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+    public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
         throws IOException {
       writer.value(toString().toLowerCase(Locale.ROOT));
     }
@@ -420,7 +525,7 @@ public final class Device implements JsonUnknown, JsonSerializable {
     public static final class Deserializer implements JsonDeserializer<DeviceOrientation> {
       @Override
       public @NotNull DeviceOrientation deserialize(
-          @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+          @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
         return DeviceOrientation.valueOf(reader.nextString().toUpperCase(Locale.ROOT));
       }
     }
@@ -456,14 +561,16 @@ public final class Device implements JsonUnknown, JsonSerializable {
     public static final String BOOT_TIME = "boot_time";
     public static final String TIMEZONE = "timezone";
     public static final String ID = "id";
-    public static final String LANGUAGE = "language";
     public static final String CONNECTION_TYPE = "connection_type";
     public static final String BATTERY_TEMPERATURE = "battery_temperature";
     public static final String LOCALE = "locale";
+    public static final String PROCESSOR_COUNT = "processor_count";
+    public static final String CPU_DESCRIPTION = "cpu_description";
+    public static final String PROCESSOR_FREQUENCY = "processor_frequency";
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (name != null) {
@@ -547,9 +654,6 @@ public final class Device implements JsonUnknown, JsonSerializable {
     if (id != null) {
       writer.name(JsonKeys.ID).value(id);
     }
-    if (language != null) {
-      writer.name(JsonKeys.LANGUAGE).value(language);
-    }
     if (connectionType != null) {
       writer.name(JsonKeys.CONNECTION_TYPE).value(connectionType);
     }
@@ -558,6 +662,15 @@ public final class Device implements JsonUnknown, JsonSerializable {
     }
     if (locale != null) {
       writer.name(JsonKeys.LOCALE).value(locale);
+    }
+    if (processorCount != null) {
+      writer.name(JsonKeys.PROCESSOR_COUNT).value(processorCount);
+    }
+    if (processorFrequency != null) {
+      writer.name(JsonKeys.PROCESSOR_FREQUENCY).value(processorFrequency);
+    }
+    if (cpuDescription != null) {
+      writer.name(JsonKeys.CPU_DESCRIPTION).value(cpuDescription);
     }
     if (unknown != null) {
       for (String key : unknown.keySet()) {
@@ -590,7 +703,7 @@ public final class Device implements JsonUnknown, JsonSerializable {
   public static final class Deserializer implements JsonDeserializer<Device> {
 
     @Override
-    public @NotNull Device deserialize(@NotNull JsonObjectReader reader, @NotNull ILogger logger)
+    public @NotNull Device deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
         throws Exception {
       reader.beginObject();
       Device device = new Device();
@@ -686,9 +799,6 @@ public final class Device implements JsonUnknown, JsonSerializable {
           case JsonKeys.ID:
             device.id = reader.nextStringOrNull();
             break;
-          case JsonKeys.LANGUAGE:
-            device.language = reader.nextStringOrNull();
-            break;
           case JsonKeys.CONNECTION_TYPE:
             device.connectionType = reader.nextStringOrNull();
             break;
@@ -697,6 +807,15 @@ public final class Device implements JsonUnknown, JsonSerializable {
             break;
           case JsonKeys.LOCALE:
             device.locale = reader.nextStringOrNull();
+            break;
+          case JsonKeys.PROCESSOR_COUNT:
+            device.processorCount = reader.nextIntegerOrNull();
+            break;
+          case JsonKeys.PROCESSOR_FREQUENCY:
+            device.processorFrequency = reader.nextDoubleOrNull();
+            break;
+          case JsonKeys.CPU_DESCRIPTION:
+            device.cpuDescription = reader.nextStringOrNull();
             break;
           default:
             if (unknown == null) {

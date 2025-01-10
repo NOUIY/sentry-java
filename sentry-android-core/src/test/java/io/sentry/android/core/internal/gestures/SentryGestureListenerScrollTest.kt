@@ -11,12 +11,18 @@ import android.widget.AbsListView
 import android.widget.ListAdapter
 import androidx.core.view.ScrollingView
 import io.sentry.Breadcrumb
-import io.sentry.IHub
+import io.sentry.IScope
+import io.sentry.IScopes
+import io.sentry.PropagationContext
+import io.sentry.Scope
+import io.sentry.ScopeCallback
 import io.sentry.SentryLevel.INFO
 import io.sentry.android.core.SentryAndroidOptions
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.check
+import org.mockito.kotlin.clearInvocations
+import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -38,7 +44,9 @@ class SentryGestureListenerScrollTest {
             isEnableUserInteractionTracing = true
             gestureTargetLocators = listOf(AndroidViewGestureTargetLocator(true))
         }
-        val hub = mock<IHub>()
+        val scopes = mock<IScopes>()
+        val scope = mock<IScope>()
+        val propagationContext = PropagationContext()
 
         val firstEvent = mock<MotionEvent>()
         val eventsInBetween = listOf(mock<MotionEvent>(), mock(), mock())
@@ -69,9 +77,11 @@ class SentryGestureListenerScrollTest {
                 endEvent.mockDirection(firstEvent, direction)
             }
             whenever(activity.window).thenReturn(window)
+            doAnswer { (it.arguments[0] as ScopeCallback).run(scope) }.whenever(scopes).configureScope(any())
+            doAnswer { (it.arguments[0] as Scope.IWithPropagationContext).accept(propagationContext); propagationContext }.whenever(scope).withPropagationContext(any())
             return SentryGestureListener(
                 activity,
-                hub,
+                scopes,
                 options
             )
         }
@@ -89,7 +99,7 @@ class SentryGestureListenerScrollTest {
         }
         sut.onUp(fixture.endEvent)
 
-        verify(fixture.hub).addBreadcrumb(
+        verify(fixture.scopes).addBreadcrumb(
             check<Breadcrumb> {
                 assertEquals("ui.scroll", it.category)
                 assertEquals("user", it.type)
@@ -112,7 +122,7 @@ class SentryGestureListenerScrollTest {
         }
         sut.onUp(fixture.endEvent)
 
-        verify(fixture.hub, never()).addBreadcrumb(any<Breadcrumb>())
+        verify(fixture.scopes, never()).addBreadcrumb(any<Breadcrumb>())
     }
 
     @Test
@@ -133,8 +143,8 @@ class SentryGestureListenerScrollTest {
         sut.onFling(fixture.firstEvent, fixture.endEvent, 1.0f, 1.0f)
         sut.onUp(fixture.endEvent)
 
-        inOrder(fixture.hub) {
-            verify(fixture.hub).addBreadcrumb(
+        inOrder(fixture.scopes) {
+            verify(fixture.scopes).addBreadcrumb(
                 check<Breadcrumb> {
                     assertEquals("ui.swipe", it.category)
                     assertEquals("user", it.type)
@@ -145,7 +155,8 @@ class SentryGestureListenerScrollTest {
                 },
                 anyOrNull()
             )
-            verify(fixture.hub).addBreadcrumb(
+            verify(fixture.scopes).configureScope(anyOrNull())
+            verify(fixture.scopes).addBreadcrumb(
                 check<Breadcrumb> {
                     assertEquals("ui.swipe", it.category)
                     assertEquals("user", it.type)
@@ -157,7 +168,7 @@ class SentryGestureListenerScrollTest {
                 anyOrNull()
             )
         }
-        verifyNoMoreInteractions(fixture.hub)
+        verifyNoMoreInteractions(fixture.scopes)
     }
 
     @Test
@@ -166,7 +177,7 @@ class SentryGestureListenerScrollTest {
         sut.onUp(fixture.firstEvent)
         sut.onDown(fixture.endEvent)
 
-        verify(fixture.hub, never()).addBreadcrumb(any<Breadcrumb>())
+        verify(fixture.scopes, never()).addBreadcrumb(any<Breadcrumb>())
     }
 
     @Test
@@ -179,7 +190,51 @@ class SentryGestureListenerScrollTest {
         }
         sut.onUp(fixture.endEvent)
 
-        verify(fixture.hub, never()).addBreadcrumb(any<Breadcrumb>())
+        verify(fixture.scopes, never()).addBreadcrumb(any<Breadcrumb>())
+    }
+
+    @Test
+    fun `starts a new trace on scroll`() {
+        val sut = fixture.getSut<ScrollableListView>(direction = "left")
+
+        sut.onDown(fixture.firstEvent)
+        fixture.eventsInBetween.forEach {
+            sut.onScroll(fixture.firstEvent, it, 10.0f, 0f)
+        }
+        sut.onUp(fixture.endEvent)
+
+        verify(fixture.scope).propagationContext = any()
+    }
+
+    @Test
+    fun `does not start a new trace on repeated scroll but does for a different event`() {
+        val sut = fixture.getSut<ScrollableListView>(direction = "left")
+
+        sut.onDown(fixture.firstEvent)
+        fixture.eventsInBetween.forEach {
+            sut.onScroll(fixture.firstEvent, it, 10.0f, 0f)
+        }
+        sut.onUp(fixture.endEvent)
+
+        verify(fixture.scope).propagationContext = any()
+
+        clearInvocations(fixture.scope)
+
+        sut.onDown(fixture.firstEvent)
+        fixture.eventsInBetween.forEach {
+            sut.onScroll(fixture.firstEvent, it, 10.0f, 0f)
+        }
+        sut.onUp(fixture.endEvent)
+        verify(fixture.scope, never()).propagationContext = any()
+
+        clearInvocations(fixture.scope)
+
+        sut.onDown(fixture.firstEvent)
+        fixture.eventsInBetween.forEach { sut.onScroll(fixture.firstEvent, it, 0f, 30.0f) }
+        sut.onFling(fixture.firstEvent, fixture.endEvent, 1.0f, 1.0f)
+        sut.onUp(fixture.endEvent)
+
+        verify(fixture.scope).propagationContext = any()
     }
 
     internal class ScrollableView : View(mock()), ScrollingView {

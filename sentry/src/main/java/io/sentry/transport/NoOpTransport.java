@@ -5,6 +5,7 @@ import io.sentry.SentryEnvelope;
 import java.io.IOException;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 @ApiStatus.Internal
 public final class NoOpTransport implements ITransport {
@@ -25,5 +26,13 @@ public final class NoOpTransport implements ITransport {
   public void flush(long timeoutMillis) {}
 
   @Override
+  public @Nullable RateLimiter getRateLimiter() {
+    return null;
+  }
+
+  @Override
   public void close() throws IOException {}
+
+  @Override
+  public void close(final boolean isRestarting) throws IOException {}
 }

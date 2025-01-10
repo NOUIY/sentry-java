@@ -65,6 +65,18 @@
       android:text="@string/anr" />
 
     <Button
+      android:id="@+id/out_of_memory"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:text="@string/out_of_memory" />
+
+    <Button
+      android:id="@+id/stack_overflow"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:text="@string/stack_overflow" />
+
+    <Button
       android:id="@+id/native_crash"
       android:layout_width="wrap_content"
       android:layout_height="wrap_content"
@@ -123,6 +135,13 @@
       android:layout_width="wrap_content"
       android:layout_height="wrap_content"
       android:text="@string/open_profiling_activity"/>
+
+    <Button
+      android:id="@+id/open_frame_data_for_spans"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:text="@string/open_frame_data_for_spans"/>
+
   </LinearLayout>
 
 </ScrollView>

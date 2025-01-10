@@ -1,9 +1,8 @@
 package io.sentry;
 
+import io.sentry.protocol.Contexts;
 import io.sentry.protocol.SentryId;
-import java.util.Date;
 import java.util.List;
-import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -24,10 +23,32 @@ public final class NoOpSpan implements ISpan {
 
   @Override
   public @NotNull ISpan startChild(
+      @NotNull String operation, @Nullable String description, @NotNull SpanOptions spanOptions) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull SpanContext spanContext, @NotNull SpanOptions spanOptions) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
       @NotNull String operation,
       @Nullable String description,
-      @Nullable Date timestamp,
+      @Nullable SentryDate timestamp,
       @NotNull Instrumenter instrumenter) {
+    return NoOpSpan.getInstance();
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull String operation,
+      @Nullable String description,
+      @Nullable SentryDate timestamp,
+      @NotNull Instrumenter instrumenter,
+      @NotNull SpanOptions spanOptions) {
     return NoOpSpan.getInstance();
   }
 
@@ -59,8 +80,7 @@ public final class NoOpSpan implements ISpan {
   public void finish(@Nullable SpanStatus status) {}
 
   @Override
-  @ApiStatus.Internal
-  public void finish(@Nullable SpanStatus status, @Nullable Date timestamp) {}
+  public void finish(@Nullable SpanStatus status, @Nullable SentryDate timestamp) {}
 
   @Override
   public void setOperation(@NotNull String operation) {}
@@ -128,7 +148,45 @@ public final class NoOpSpan implements ISpan {
       @NotNull String name, @NotNull Number value, @NotNull MeasurementUnit unit) {}
 
   @Override
+  public boolean updateEndDate(final @NotNull SentryDate date) {
+    return false;
+  }
+
+  @Override
+  public @NotNull SentryDate getStartDate() {
+    return new SentryNanotimeDate();
+  }
+
+  @Override
+  public @NotNull SentryDate getFinishDate() {
+    return new SentryNanotimeDate();
+  }
+
+  @Override
   public boolean isNoOp() {
     return true;
+  }
+
+  @Override
+  public void setContext(@NotNull String key, @NotNull Object context) {}
+
+  @Override
+  public @NotNull Contexts getContexts() {
+    return new Contexts();
+  }
+
+  @Override
+  public @Nullable Boolean isSampled() {
+    return null;
+  }
+
+  @Override
+  public @Nullable TracesSamplingDecision getSamplingDecision() {
+    return null;
+  }
+
+  @Override
+  public @NotNull ISentryLifecycleToken makeCurrent() {
+    return NoOpScopesLifecycleToken.getInstance();
   }
 }

@@ -5,25 +5,33 @@ import static io.sentry.SentryLevel.INFO;
 
 import io.sentry.DataCategory;
 import io.sentry.Hint;
+import io.sentry.ISentryLifecycleToken;
 import io.sentry.SentryEnvelope;
 import io.sentry.SentryEnvelopeItem;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
 import io.sentry.clientreport.DiscardReason;
+import io.sentry.hints.DiskFlushNotification;
 import io.sentry.hints.Retryable;
 import io.sentry.hints.SubmissionResult;
+import io.sentry.util.AutoClosableReentrantLock;
 import io.sentry.util.HintUtils;
 import io.sentry.util.StringUtils;
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 /** Controls retry limits on different category types sent to Sentry. */
-public final class RateLimiter {
+public final class RateLimiter implements Closeable {
 
   private static final int HTTP_RETRY_AFTER_DEFAULT_DELAY_MILLIS = 60000;
 
@@ -31,6 +39,9 @@ public final class RateLimiter {
   private final @NotNull SentryOptions options;
   private final @NotNull Map<DataCategory, @NotNull Date> sentryRetryAfterLimit =
       new ConcurrentHashMap<>();
+  private final @NotNull List<IRateLimitObserver> rateLimitObservers = new CopyOnWriteArrayList<>();
+  private @Nullable Timer timer = null;
+  private final @NotNull AutoClosableReentrantLock timerLock = new AutoClosableReentrantLock();
 
   public RateLimiter(
       final @NotNull ICurrentDateProvider currentDateProvider,
@@ -48,7 +59,7 @@ public final class RateLimiter {
     // Optimize for/No allocations if no items are under 429
     List<SentryEnvelopeItem> dropItems = null;
     for (SentryEnvelopeItem item : envelope.getItems()) {
-      //       using the raw value of the enum to not expose SentryEnvelopeItemType
+      // using the raw value of the enum to not expose SentryEnvelopeItemType
       if (isRetryAfter(item.getHeader().getType().getItemType())) {
         if (dropItems == null) {
           dropItems = new ArrayList<>();
@@ -87,26 +98,8 @@ public final class RateLimiter {
     return envelope;
   }
 
-  /**
-   * It marks the hint when sending has failed, so it's not necessary to wait the timeout
-   *
-   * @param hint the Hints
-   * @param retry if event should be retried or not
-   */
-  private static void markHintWhenSendingFailed(final @NotNull Hint hint, final boolean retry) {
-    HintUtils.runIfHasType(hint, SubmissionResult.class, result -> result.setResult(false));
-    HintUtils.runIfHasType(hint, Retryable.class, retryable -> retryable.setRetry(retry));
-  }
-
-  /**
-   * Check if an itemType is retry after or not
-   *
-   * @param itemType the itemType (eg event, session, etc...)
-   * @return true if retry after or false otherwise
-   */
   @SuppressWarnings({"JdkObsolete", "JavaUtilDate"})
-  private boolean isRetryAfter(final @NotNull String itemType) {
-    final DataCategory dataCategory = getCategoryFromItemType(itemType);
+  public boolean isActiveForCategory(final @NotNull DataCategory dataCategory) {
     final Date currentDate = new Date(currentDateProvider.getCurrentTimeMillis());
 
     // check all categories
@@ -131,6 +124,52 @@ public final class RateLimiter {
     return false;
   }
 
+  @SuppressWarnings({"JdkObsolete", "JavaUtilDate"})
+  public boolean isAnyRateLimitActive() {
+    final Date currentDate = new Date(currentDateProvider.getCurrentTimeMillis());
+
+    for (DataCategory dataCategory : sentryRetryAfterLimit.keySet()) {
+      final Date dateCategory = sentryRetryAfterLimit.get(dataCategory);
+      if (dateCategory != null) {
+        if (!currentDate.after(dateCategory)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * It marks the hint when sending has failed, so it's not necessary to wait the timeout
+   *
+   * @param hint the Hints
+   * @param retry if event should be retried or not
+   */
+  private void markHintWhenSendingFailed(final @NotNull Hint hint, final boolean retry) {
+    HintUtils.runIfHasType(hint, SubmissionResult.class, result -> result.setResult(false));
+    HintUtils.runIfHasType(hint, Retryable.class, retryable -> retryable.setRetry(retry));
+    HintUtils.runIfHasType(
+        hint,
+        DiskFlushNotification.class,
+        (diskFlushNotification) -> {
+          diskFlushNotification.markFlushed();
+          options.getLogger().log(SentryLevel.DEBUG, "Disk flush envelope fired due to rate limit");
+        });
+  }
+
+  /**
+   * Check if an itemType is retry after or not
+   *
+   * @param itemType the itemType (eg event, session, etc...)
+   * @return true if retry after or false otherwise
+   */
+  @SuppressWarnings({"JdkObsolete", "JavaUtilDate"})
+  private boolean isRetryAfter(final @NotNull String itemType) {
+    final DataCategory dataCategory = getCategoryFromItemType(itemType);
+    return isActiveForCategory(dataCategory);
+  }
+
   /**
    * Returns a rate limiting category from item itemType
    *
@@ -145,8 +184,14 @@ public final class RateLimiter {
         return DataCategory.Session;
       case "attachment":
         return DataCategory.Attachment;
+      case "profile":
+        return DataCategory.Profile;
       case "transaction":
         return DataCategory.Transaction;
+      case "check_in":
+        return DataCategory.Monitor;
+      case "replay_video":
+        return DataCategory.Replay;
       default:
         return DataCategory.Unknown;
     }
@@ -164,21 +209,25 @@ public final class RateLimiter {
       final @Nullable String sentryRateLimitHeader,
       final @Nullable String retryAfterHeader,
       final int errorCode) {
+    // example: 2700:metric_bucket:organization:quota_exceeded:custom,...
     if (sentryRateLimitHeader != null) {
       for (String limit : sentryRateLimitHeader.split(",", -1)) {
 
         // Java 11 or so has strip() :(
         limit = limit.replace(" ", "");
 
-        final String[] retryAfterAndCategories =
-            limit.split(":", -1); // we only need for 1st and 2nd item though.
+        final String[] rateLimit = limit.split(":", -1);
+        // These can be ignored by the SDK.
+        // final String scope = rateLimit.length > 2 ? rateLimit[2] : null;
+        // final String reasonCode = rateLimit.length > 3 ? rateLimit[3] : null;
+        // final @Nullable String limitNamespaces = rateLimit.length > 4 ? rateLimit[4] : null;
 
-        if (retryAfterAndCategories.length > 0) {
-          final String retryAfter = retryAfterAndCategories[0];
+        if (rateLimit.length > 0) {
+          final String retryAfter = rateLimit[0];
           long retryAfterMillis = parseRetryAfterOrDefault(retryAfter);
 
-          if (retryAfterAndCategories.length > 1) {
-            final String allCategories = retryAfterAndCategories[1];
+          if (rateLimit.length > 1) {
+            final String allCategories = rateLimit[1];
 
             // we dont care if Date is UTC as we just add the relative seconds
             final Date date =
@@ -190,7 +239,7 @@ public final class RateLimiter {
               for (final String catItem : categories) {
                 DataCategory dataCategory = DataCategory.Unknown;
                 try {
-                  final String catItemCapitalized = StringUtils.capitalize(catItem);
+                  final String catItemCapitalized = StringUtils.camelCase(catItem);
                   if (catItemCapitalized != null) {
                     dataCategory = DataCategory.valueOf(catItemCapitalized);
                   } else {
@@ -203,6 +252,7 @@ public final class RateLimiter {
                 if (DataCategory.Unknown.equals(dataCategory)) {
                   continue;
                 }
+
                 applyRetryAfterOnlyIfLonger(dataCategory, date);
               }
             } else {
@@ -234,6 +284,23 @@ public final class RateLimiter {
     // only overwrite its previous date if the limit is even longer
     if (oldDate == null || date.after(oldDate)) {
       sentryRetryAfterLimit.put(dataCategory, date);
+
+      notifyRateLimitObservers();
+
+      try (final @NotNull ISentryLifecycleToken ignored = timerLock.acquire()) {
+        if (timer == null) {
+          timer = new Timer(true);
+        }
+
+        timer.schedule(
+            new TimerTask() {
+              @Override
+              public void run() {
+                notifyRateLimitObservers();
+              }
+            },
+            date);
+      }
     }
   }
 
@@ -254,5 +321,42 @@ public final class RateLimiter {
       }
     }
     return retryAfterMillis;
+  }
+
+  private void notifyRateLimitObservers() {
+    for (IRateLimitObserver observer : rateLimitObservers) {
+      observer.onRateLimitChanged(this);
+    }
+  }
+
+  public void addRateLimitObserver(@NotNull final IRateLimitObserver observer) {
+    rateLimitObservers.add(observer);
+  }
+
+  public void removeRateLimitObserver(@NotNull final IRateLimitObserver observer) {
+    rateLimitObservers.remove(observer);
+  }
+
+  @Override
+  public void close() throws IOException {
+    try (final @NotNull ISentryLifecycleToken ignored = timerLock.acquire()) {
+      if (timer != null) {
+        timer.cancel();
+        timer = null;
+      }
+    }
+    rateLimitObservers.clear();
+  }
+
+  public interface IRateLimitObserver {
+    /**
+     * Invoked whenever the rate limit changed. You should use {@link
+     * RateLimiter#isActiveForCategory(DataCategory)} to check whether the category you're
+     * interested in has changed.
+     *
+     * @param rateLimiter this {@link RateLimiter} instance which you can use to check if the rate
+     *     limit is active for a specific category
+     */
+    void onRateLimitChanged(@NotNull RateLimiter rateLimiter);
   }
 }

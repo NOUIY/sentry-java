@@ -1,13 +1,13 @@
 package io.sentry.android.timber
 
-import io.sentry.IHub
 import io.sentry.ILogger
+import io.sentry.IScopes
 import io.sentry.Integration
+import io.sentry.SentryIntegrationPackageStorage
 import io.sentry.SentryLevel
 import io.sentry.SentryOptions
-import io.sentry.android.timber.BuildConfig.SENTRY_TIMBER_SDK_NAME
 import io.sentry.android.timber.BuildConfig.VERSION_NAME
-import io.sentry.protocol.SdkVersion
+import io.sentry.util.IntegrationUtils.addIntegrationToSdkVersion
 import timber.log.Timber
 import java.io.Closeable
 
@@ -21,14 +21,15 @@ class SentryTimberIntegration(
     private lateinit var tree: SentryTimberTree
     private lateinit var logger: ILogger
 
-    override fun register(hub: IHub, options: SentryOptions) {
-        createSdkVersion(options)
+    override fun register(scopes: IScopes, options: SentryOptions) {
         logger = options.logger
 
-        tree = SentryTimberTree(hub, minEventLevel, minBreadcrumbLevel)
+        tree = SentryTimberTree(scopes, minEventLevel, minBreadcrumbLevel)
         Timber.plant(tree)
 
         logger.log(SentryLevel.DEBUG, "SentryTimberIntegration installed.")
+        SentryIntegrationPackageStorage.getInstance().addPackage("maven:io.sentry:sentry-android-timber", VERSION_NAME)
+        addIntegrationToSdkVersion("Timber")
     }
 
     override fun close() {
@@ -39,17 +40,5 @@ class SentryTimberIntegration(
                 logger.log(SentryLevel.DEBUG, "SentryTimberIntegration removed.")
             }
         }
-    }
-
-    private fun createSdkVersion(options: SentryOptions): SdkVersion {
-        var sdkVersion = options.sdkVersion
-
-        val name = SENTRY_TIMBER_SDK_NAME
-        val version = VERSION_NAME
-        sdkVersion = SdkVersion.updateSdkVersion(sdkVersion, name, version)
-
-        sdkVersion.addPackage("maven:io.sentry:sentry-android-timber", VERSION_NAME)
-
-        return sdkVersion
     }
 }

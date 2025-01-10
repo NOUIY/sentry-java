@@ -1,9 +1,11 @@
 package io.sentry.transport
 
+import io.sentry.ILogger
 import io.sentry.ISerializer
 import io.sentry.RequestDetails
 import io.sentry.SentryEnvelope
 import io.sentry.SentryEvent
+import io.sentry.SentryLevel
 import io.sentry.SentryOptions
 import io.sentry.SentryOptions.Proxy
 import io.sentry.Session
@@ -19,7 +21,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Proxy.Type
 import java.net.URL
-import javax.net.ssl.HostnameVerifier
+import java.nio.charset.Charset
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocketFactory
 import kotlin.test.Test
@@ -38,13 +40,12 @@ class HttpConnectionTest {
         val authenticatorWrapper = mock<AuthenticatorWrapper>()
         val rateLimiter = mock<RateLimiter>()
         var sslSocketFactory: SSLSocketFactory? = null
-        var hostnameVerifier: HostnameVerifier? = null
         val requestDetails = mock<RequestDetails>()
+        val options = SentryOptions()
 
         init {
             whenever(connection.outputStream).thenReturn(mock())
             whenever(connection.inputStream).thenReturn(mock())
-            whenever(connection.setHostnameVerifier(any())).thenCallRealMethod()
             whenever(connection.setSSLSocketFactory(any())).thenCallRealMethod()
             whenever(requestDetails.headers).thenReturn(mapOf("header-name" to "header-value"))
             val url = mock<URL>()
@@ -54,11 +55,9 @@ class HttpConnectionTest {
         }
 
         fun getSUT(): HttpConnection {
-            val options = SentryOptions()
             options.setSerializer(serializer)
             options.proxy = proxy
             options.sslSocketFactory = sslSocketFactory
-            options.hostnameVerifier = hostnameVerifier
 
             return HttpConnection(options, requestDetails, authenticatorWrapper, rateLimiter)
         }
@@ -168,23 +167,31 @@ class HttpConnectionTest {
     }
 
     @Test
-    fun `When HostnameVerifier is given, set to connection`() {
-        val hostname = mock<HostnameVerifier>()
-        fixture.hostnameVerifier = hostname
+    fun `When connection error message contains formatting symbols, does not crash the logger`() {
+        fixture.options.isDebug = true
+        fixture.options.setLogger(object : ILogger {
+            override fun log(level: SentryLevel, message: String, vararg args: Any?) =
+                println(String.format(message, args))
+
+            override fun log(level: SentryLevel, message: String, throwable: Throwable?) =
+                println(message)
+
+            override fun log(
+                level: SentryLevel,
+                throwable: Throwable?,
+                message: String,
+                vararg args: Any?
+            ) = println(String.format(message))
+
+            override fun isEnabled(level: SentryLevel?): Boolean = true
+        })
+
+        // when error message contains funky formatting symbols
+        whenever(fixture.connection.errorStream).thenReturn("Something is off %d, %s, %s\n".byteInputStream(Charset.forName("UTF-8")))
         val transport = fixture.getSUT()
 
+        // it should not crash
         transport.send(createEnvelope())
-
-        verify(fixture.connection).hostnameVerifier = eq(hostname)
-    }
-
-    @Test
-    fun `When HostnameVerifier is not given, do not set to connection`() {
-        val transport = fixture.getSUT()
-
-        transport.send(createEnvelope())
-
-        verify(fixture.connection, never()).hostnameVerifier = any()
     }
 
     @Test
@@ -221,6 +228,28 @@ class HttpConnectionTest {
 
         assertNull(transport.proxy)
         verify(fixture.authenticatorWrapper, never()).setDefault(any())
+    }
+
+    @Test
+    fun `When Proxy type is not set, it defaults to HTTP`() {
+        fixture.proxy = Proxy("proxy.example.com", "8080")
+        val transport = fixture.getSUT()
+
+        transport.send(createEnvelope())
+
+        assertEquals(Type.HTTP, transport.proxy!!.type())
+    }
+
+    @Test
+    fun `When Proxy type is set to SOCKS, HTTP connection uses it`() {
+        fixture.proxy = Proxy("proxy.example.com", "8080").apply {
+            type = Type.SOCKS
+        }
+        val transport = fixture.getSUT()
+
+        transport.send(createEnvelope())
+
+        assertEquals(Type.SOCKS, transport.proxy!!.type())
     }
 
     @Test

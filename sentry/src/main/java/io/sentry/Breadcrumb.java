@@ -1,10 +1,15 @@
 package io.sentry;
 
 import io.sentry.util.CollectionUtils;
+import io.sentry.util.HttpUtils;
+import io.sentry.util.Objects;
+import io.sentry.util.UrlUtils;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -13,10 +18,15 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 /** Series of application events */
-public final class Breadcrumb implements JsonUnknown, JsonSerializable {
+public final class Breadcrumb implements JsonUnknown, JsonSerializable, Comparable<Breadcrumb> {
 
-  /** A timestamp representing when the breadcrumb occurred. */
-  private final @NotNull Date timestamp;
+  /** A timestamp representing when the breadcrumb occurred in milliseconds. */
+  private @Nullable final Long timestampMs;
+
+  /** A timestamp representing when the breadcrumb occurred as java.util.Date. */
+  private @Nullable Date timestamp;
+
+  private final @NotNull Long nanos;
 
   /** If a message is provided, its rendered as text and the whitespace is preserved. */
   private @Nullable String message;
@@ -30,6 +40,12 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
   /** Dotted strings that indicate what the crumb is or where it comes from. */
   private @Nullable String category;
 
+  /**
+   * Origin of the breadcrumb that is used to identify source of the breadcrumb. For example hybrid
+   * SDKs can identify native breadcrumbs from JS or Flutter.
+   */
+  private @Nullable String origin;
+
   /** The level of the event. */
   private @Nullable SentryLevel level;
 
@@ -41,21 +57,122 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
    *
    * @param timestamp the timestamp
    */
+  @SuppressWarnings("JavaUtilDate")
   public Breadcrumb(final @NotNull Date timestamp) {
+    this.nanos = System.nanoTime();
     this.timestamp = timestamp;
+    this.timestampMs = null;
+  }
+
+  public Breadcrumb(final long timestamp) {
+    this.nanos = System.nanoTime();
+    this.timestampMs = timestamp;
+    this.timestamp = null;
   }
 
   Breadcrumb(final @NotNull Breadcrumb breadcrumb) {
+    this.nanos = System.nanoTime();
     this.timestamp = breadcrumb.timestamp;
+    this.timestampMs = breadcrumb.timestampMs;
     this.message = breadcrumb.message;
     this.type = breadcrumb.type;
     this.category = breadcrumb.category;
+    this.origin = breadcrumb.origin;
     final Map<String, Object> dataClone = CollectionUtils.newConcurrentHashMap(breadcrumb.data);
     if (dataClone != null) {
       this.data = dataClone;
     }
     this.unknown = CollectionUtils.newConcurrentHashMap(breadcrumb.unknown);
     this.level = breadcrumb.level;
+  }
+
+  /**
+   * Creates breadcrumb from a map.
+   *
+   * @param map - The breadcrumb data as map
+   * @param options - the sentry options
+   * @return the breadcrumb
+   */
+  @SuppressWarnings("unchecked")
+  public static Breadcrumb fromMap(
+      @NotNull Map<String, Object> map, @NotNull SentryOptions options) {
+
+    @NotNull Date timestamp = DateUtils.getCurrentDateTime();
+    String message = null;
+    String type = null;
+    @NotNull Map<String, Object> data = new ConcurrentHashMap<>();
+    String category = null;
+    String origin = null;
+    SentryLevel level = null;
+    Map<String, Object> unknown = null;
+
+    for (Map.Entry<String, Object> entry : map.entrySet()) {
+      Object value = entry.getValue();
+      switch (entry.getKey()) {
+        case JsonKeys.TIMESTAMP:
+          if (value instanceof String) {
+            Date deserializedDate = ObjectReader.dateOrNull((String) value, options.getLogger());
+            if (deserializedDate != null) {
+              timestamp = deserializedDate;
+            }
+          }
+          break;
+        case JsonKeys.MESSAGE:
+          message = (value instanceof String) ? (String) value : null;
+          break;
+        case JsonKeys.TYPE:
+          type = (value instanceof String) ? (String) value : null;
+          break;
+        case JsonKeys.DATA:
+          final Map<Object, Object> untypedData =
+              (value instanceof Map) ? (Map<Object, Object>) value : null;
+          if (untypedData != null) {
+            for (Map.Entry<Object, Object> dataEntry : untypedData.entrySet()) {
+              if (dataEntry.getKey() instanceof String && dataEntry.getValue() != null) {
+                data.put((String) dataEntry.getKey(), dataEntry.getValue());
+              } else {
+                options
+                    .getLogger()
+                    .log(SentryLevel.WARNING, "Invalid key or null value in data map.");
+              }
+            }
+          }
+          break;
+        case JsonKeys.CATEGORY:
+          category = (value instanceof String) ? (String) value : null;
+          break;
+        case JsonKeys.ORIGIN:
+          origin = (value instanceof String) ? (String) value : null;
+          break;
+        case JsonKeys.LEVEL:
+          String levelString = (value instanceof String) ? (String) value : null;
+          if (levelString != null) {
+            try {
+              level = SentryLevel.valueOf(levelString.toUpperCase(Locale.ROOT));
+            } catch (Exception exception) {
+              // Stub
+            }
+          }
+          break;
+        default:
+          if (unknown == null) {
+            unknown = new ConcurrentHashMap<>();
+          }
+          unknown.put(entry.getKey(), entry.getValue());
+          break;
+      }
+    }
+
+    final Breadcrumb breadcrumb = new Breadcrumb(timestamp);
+    breadcrumb.message = message;
+    breadcrumb.type = type;
+    breadcrumb.data = data;
+    breadcrumb.category = category;
+    breadcrumb.origin = origin;
+    breadcrumb.level = level;
+
+    breadcrumb.setUnknown(unknown);
+    return breadcrumb;
   }
 
   /**
@@ -67,10 +184,19 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
    */
   public static @NotNull Breadcrumb http(final @NotNull String url, final @NotNull String method) {
     final Breadcrumb breadcrumb = new Breadcrumb();
+    final @NotNull UrlUtils.UrlDetails urlDetails = UrlUtils.parse(url);
     breadcrumb.setType("http");
     breadcrumb.setCategory("http");
-    breadcrumb.setData("url", url);
+    if (urlDetails.getUrl() != null) {
+      breadcrumb.setData("url", urlDetails.getUrl());
+    }
     breadcrumb.setData("method", method.toUpperCase(Locale.ROOT));
+    if (urlDetails.getQuery() != null) {
+      breadcrumb.setData("http.query", urlDetails.getQuery());
+    }
+    if (urlDetails.getFragment() != null) {
+      breadcrumb.setData("http.fragment", urlDetails.getFragment());
+    }
     return breadcrumb;
   }
 
@@ -88,7 +214,115 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
     final Breadcrumb breadcrumb = http(url, method);
     if (code != null) {
       breadcrumb.setData("status_code", code);
+      breadcrumb.setLevel(levelFromHttpStatusCode(code));
     }
+    return breadcrumb;
+  }
+
+  /**
+   * Creates a breadcrumb for a GraphQL operation.
+   *
+   * @param operationName - the name of the GraphQL operation
+   * @param operationType - the type of GraphQL operation (e.g. query, mutation, subscription)
+   * @param operationId - the ID of the GraphQL operation
+   * @return the breadcrumb
+   */
+  public static @NotNull Breadcrumb graphqlOperation(
+      final @Nullable String operationName,
+      final @Nullable String operationType,
+      final @Nullable String operationId) {
+    final Breadcrumb breadcrumb = new Breadcrumb();
+
+    breadcrumb.setType("graphql");
+
+    if (operationName != null) {
+      breadcrumb.setData("operation_name", operationName);
+    }
+    if (operationType != null) {
+      breadcrumb.setData("operation_type", operationType);
+      breadcrumb.setCategory(operationType);
+    } else {
+      breadcrumb.setCategory("graphql.operation");
+    }
+    if (operationId != null) {
+      breadcrumb.setData("operation_id", operationId);
+    }
+
+    return breadcrumb;
+  }
+
+  /**
+   * Creates a breadcrumb for a GraphQL data fetcher.
+   *
+   * @param path - the name of the GraphQL operation
+   * @param field - the field being fetched
+   * @param type - the type being fetched
+   * @param objectType - the object type of the GraphQL data fetch operation
+   * @return the breadcrumb
+   */
+  public static @NotNull Breadcrumb graphqlDataFetcher(
+      final @Nullable String path,
+      final @Nullable String field,
+      final @Nullable String type,
+      final @Nullable String objectType) {
+    final Breadcrumb breadcrumb = new Breadcrumb();
+
+    breadcrumb.setType("graphql");
+    breadcrumb.setCategory("graphql.fetcher");
+
+    if (path != null) {
+      breadcrumb.setData("path", path);
+    }
+    if (field != null) {
+      breadcrumb.setData("field", field);
+    }
+    if (type != null) {
+      breadcrumb.setData("type", type);
+    }
+    if (objectType != null) {
+      breadcrumb.setData("object_type", objectType);
+    }
+
+    return breadcrumb;
+  }
+
+  /**
+   * Creates a breadcrumb for a GraphQL data loader.
+   *
+   * @param keys - keys to be fetched by the data loader
+   * @param keyType - class of the data loaders key(s)
+   * @param valueType - class of the data loaders value(s)
+   * @param name - name of the data loader
+   * @return the breadcrumb
+   */
+  public static @NotNull Breadcrumb graphqlDataLoader(
+      final @NotNull Iterable<?> keys,
+      final @Nullable Class<?> keyType,
+      final @Nullable Class<?> valueType,
+      final @Nullable String name) {
+    final Breadcrumb breadcrumb = new Breadcrumb();
+
+    breadcrumb.setType("graphql");
+    breadcrumb.setCategory("graphql.data_loader");
+
+    final List<String> serializedKeys = new ArrayList<>();
+    for (Object key : keys) {
+      serializedKeys.add(key.toString());
+    }
+    breadcrumb.setData("keys", serializedKeys);
+
+    if (keyType != null) {
+      breadcrumb.setData("key_type", keyType.getName());
+    }
+
+    if (valueType != null) {
+      breadcrumb.setData("value_type", valueType.getName());
+    }
+
+    if (name != null) {
+      breadcrumb.setData("name", name);
+    }
+
     return breadcrumb;
   }
 
@@ -286,9 +520,19 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
     return userInteraction(subCategory, viewId, viewClass, null, additionalData);
   }
 
+  private static @Nullable SentryLevel levelFromHttpStatusCode(final @NotNull Integer code) {
+    if (HttpUtils.isHttpClientError(code)) {
+      return SentryLevel.WARNING;
+    } else if (HttpUtils.isHttpServerError(code)) {
+      return SentryLevel.ERROR;
+    } else {
+      return null;
+    }
+  }
+
   /** Breadcrumb ctor */
   public Breadcrumb() {
-    this(DateUtils.getCurrentDateTime());
+    this(System.currentTimeMillis());
   }
 
   /**
@@ -302,13 +546,20 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
   }
 
   /**
-   * Returns the Breadcrumb's timestamp
+   * Returns the Breadcrumb's timestamp as java.util.Date
    *
    * @return the timestamp
    */
-  @SuppressWarnings({"JdkObsolete", "JavaUtilDate"})
+  @SuppressWarnings("JavaUtilDate")
   public @NotNull Date getTimestamp() {
-    return (Date) timestamp.clone();
+    if (timestamp != null) {
+      return (Date) timestamp.clone();
+    } else if (timestampMs != null) {
+      // we memoize it here into timestamp to avoid instantiating Calendar again and again
+      timestamp = DateUtils.getDateTime(timestampMs);
+      return timestamp;
+    }
+    throw new IllegalStateException("No timestamp set for breadcrumb");
   }
 
   /**
@@ -407,6 +658,24 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
   }
 
   /**
+   * Returns the origin
+   *
+   * @return the origin
+   */
+  public @Nullable String getOrigin() {
+    return origin;
+  }
+
+  /**
+   * Sets the origin
+   *
+   * @param origin the origin
+   */
+  public void setOrigin(@Nullable String origin) {
+    this.origin = origin;
+  }
+
+  /**
    * Returns the SentryLevel
    *
    * @return the level
@@ -424,6 +693,25 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
     this.level = level;
   }
 
+  @SuppressWarnings("JavaUtilDate")
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    Breadcrumb that = (Breadcrumb) o;
+    return getTimestamp().getTime() == that.getTimestamp().getTime()
+        && Objects.equals(message, that.message)
+        && Objects.equals(type, that.type)
+        && Objects.equals(category, that.category)
+        && Objects.equals(origin, that.origin)
+        && level == that.level;
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(timestamp, message, type, category, origin, level);
+  }
+
   // region json
 
   @Nullable
@@ -437,20 +725,27 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
     this.unknown = unknown;
   }
 
+  @Override
+  @SuppressWarnings("JavaUtilDate")
+  public int compareTo(@NotNull Breadcrumb o) {
+    return nanos.compareTo(o.nanos);
+  }
+
   public static final class JsonKeys {
     public static final String TIMESTAMP = "timestamp";
     public static final String MESSAGE = "message";
     public static final String TYPE = "type";
     public static final String DATA = "data";
     public static final String CATEGORY = "category";
+    public static final String ORIGIN = "origin";
     public static final String LEVEL = "level";
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
-    writer.name(JsonKeys.TIMESTAMP).value(logger, timestamp);
+    writer.name(JsonKeys.TIMESTAMP).value(logger, getTimestamp());
     if (message != null) {
       writer.name(JsonKeys.MESSAGE).value(message);
     }
@@ -460,6 +755,9 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
     writer.name(JsonKeys.DATA).value(logger, data);
     if (category != null) {
       writer.name(JsonKeys.CATEGORY).value(category);
+    }
+    if (origin != null) {
+      writer.name(JsonKeys.ORIGIN).value(origin);
     }
     if (level != null) {
       writer.name(JsonKeys.LEVEL).value(logger, level);
@@ -477,14 +775,15 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
   public static final class Deserializer implements JsonDeserializer<Breadcrumb> {
     @SuppressWarnings("unchecked")
     @Override
-    public @NotNull Breadcrumb deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull Breadcrumb deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
       reader.beginObject();
       @NotNull Date timestamp = DateUtils.getCurrentDateTime();
       String message = null;
       String type = null;
       @NotNull Map<String, Object> data = new ConcurrentHashMap<>();
       String category = null;
+      String origin = null;
       SentryLevel level = null;
 
       Map<String, Object> unknown = null;
@@ -514,6 +813,9 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
           case JsonKeys.CATEGORY:
             category = reader.nextStringOrNull();
             break;
+          case JsonKeys.ORIGIN:
+            origin = reader.nextStringOrNull();
+            break;
           case JsonKeys.LEVEL:
             try {
               level = new SentryLevel.Deserializer().deserialize(reader, logger);
@@ -535,6 +837,7 @@ public final class Breadcrumb implements JsonUnknown, JsonSerializable {
       breadcrumb.type = type;
       breadcrumb.data = data;
       breadcrumb.category = category;
+      breadcrumb.origin = origin;
       breadcrumb.level = level;
 
       breadcrumb.setUnknown(unknown);

@@ -2,6 +2,7 @@ package io.sentry;
 
 import static io.sentry.SentryLevel.ERROR;
 import static io.sentry.cache.EnvelopeCache.PREFIX_CURRENT_SESSION_FILE;
+import static io.sentry.cache.EnvelopeCache.PREFIX_PREVIOUS_SESSION_FILE;
 
 import io.sentry.cache.EnvelopeCache;
 import io.sentry.hints.Flushable;
@@ -35,19 +36,20 @@ public final class OutboxSender extends DirectoryProcessor implements IEnvelopeS
   @SuppressWarnings("CharsetObjectCanBeUsed")
   private static final Charset UTF_8 = Charset.forName("UTF-8");
 
-  private final @NotNull IHub hub;
+  private final @NotNull IScopes scopes;
   private final @NotNull IEnvelopeReader envelopeReader;
   private final @NotNull ISerializer serializer;
   private final @NotNull ILogger logger;
 
   public OutboxSender(
-      final @NotNull IHub hub,
+      final @NotNull IScopes scopes,
       final @NotNull IEnvelopeReader envelopeReader,
       final @NotNull ISerializer serializer,
       final @NotNull ILogger logger,
-      final long flushTimeoutMillis) {
-    super(logger, flushTimeoutMillis);
-    this.hub = Objects.requireNonNull(hub, "Hub is required.");
+      final long flushTimeoutMillis,
+      final int maxQueueSize) {
+    super(scopes, logger, flushTimeoutMillis, maxQueueSize);
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required.");
     this.envelopeReader = Objects.requireNonNull(envelopeReader, "Envelope reader is required.");
     this.serializer = Objects.requireNonNull(serializer, "Serializer is required.");
     this.logger = Objects.requireNonNull(logger, "Logger is required.");
@@ -99,6 +101,7 @@ public final class OutboxSender extends DirectoryProcessor implements IEnvelopeS
     // ignore current.envelope
     return fileName != null
         && !fileName.startsWith(PREFIX_CURRENT_SESSION_FILE)
+        && !fileName.startsWith(PREFIX_PREVIOUS_SESSION_FILE)
         && !fileName.startsWith(EnvelopeCache.STARTUP_CRASH_MARKER_FILE);
     // TODO: Use an extension to filter out relevant files
   }
@@ -141,7 +144,7 @@ public final class OutboxSender extends DirectoryProcessor implements IEnvelopeS
               logUnexpectedEventId(envelope, event.getEventId(), currentItem);
               continue;
             }
-            hub.captureEvent(event, hint);
+            scopes.captureEvent(event, hint);
             logItemCaptured(currentItem);
 
             if (!waitFlush(hint)) {
@@ -178,7 +181,7 @@ public final class OutboxSender extends DirectoryProcessor implements IEnvelopeS
                   .getTrace()
                   .setSamplingDecision(extractSamplingDecision(traceContext));
             }
-            hub.captureTransaction(transaction, traceContext, hint);
+            scopes.captureTransaction(transaction, traceContext, hint);
             logItemCaptured(currentItem);
 
             if (!waitFlush(hint)) {
@@ -194,7 +197,7 @@ public final class OutboxSender extends DirectoryProcessor implements IEnvelopeS
         final SentryEnvelope newEnvelope =
             new SentryEnvelope(
                 envelope.getHeader().getEventId(), envelope.getHeader().getSdkVersion(), item);
-        hub.captureEnvelope(newEnvelope, hint);
+        scopes.captureEnvelope(newEnvelope, hint);
         logger.log(
             SentryLevel.DEBUG,
             "%s item %d is being captured.",

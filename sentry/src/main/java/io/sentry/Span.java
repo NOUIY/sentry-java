@@ -1,8 +1,11 @@
 package io.sentry;
 
+import io.sentry.protocol.Contexts;
+import io.sentry.protocol.MeasurementValue;
 import io.sentry.protocol.SentryId;
 import io.sentry.util.Objects;
-import java.util.Date;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -10,25 +13,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
-import org.jetbrains.annotations.VisibleForTesting;
 
 @ApiStatus.Internal
 public final class Span implements ISpan {
 
   /** The moment in time when span was started. */
-  private final @NotNull Date startTimestamp;
-
-  /**
-   * The moment in time when span has started, read from {@link System#nanoTime()}. Can be {@code
-   * null} when {@link #startTimestamp} was provided to span constructor.
-   */
-  private final @Nullable Long startNanos;
-
-  /** The moment in time when span has finished, read from {@link System#nanoTime()}. */
-  private @Nullable Long endNanos;
+  private @NotNull SentryDate startTimestamp;
 
   /** The moment in time when span has ended. */
-  private @Nullable Double timestamp;
+  private @Nullable SentryDate timestamp;
 
   private final @NotNull SpanContext context;
 
@@ -41,70 +34,67 @@ public final class Span implements ISpan {
   /** A throwable thrown during the execution of the span. */
   private @Nullable Throwable throwable;
 
-  private final @NotNull IHub hub;
+  private final @NotNull IScopes scopes;
 
-  private final @NotNull AtomicBoolean finished = new AtomicBoolean(false);
+  private boolean finished = false;
+
+  private final @NotNull AtomicBoolean isFinishing = new AtomicBoolean(false);
+
+  private final @NotNull SpanOptions options;
 
   private @Nullable SpanFinishedCallback spanFinishedCallback;
 
   private final @NotNull Map<String, Object> data = new ConcurrentHashMap<>();
+  private final @NotNull Map<String, MeasurementValue> measurements = new ConcurrentHashMap<>();
+
+  private final @NotNull Contexts contexts = new Contexts();
 
   Span(
-      final @NotNull SentryId traceId,
-      final @Nullable SpanId parentSpanId,
       final @NotNull SentryTracer transaction,
-      final @NotNull String operation,
-      final @NotNull IHub hub) {
-    this(traceId, parentSpanId, transaction, operation, hub, null, null);
-  }
-
-  Span(
-      final @NotNull SentryId traceId,
-      final @Nullable SpanId parentSpanId,
-      final @NotNull SentryTracer transaction,
-      final @NotNull String operation,
-      final @NotNull IHub hub,
-      final @Nullable Date startTimestamp,
+      final @NotNull IScopes scopes,
+      final @NotNull SpanContext spanContext,
+      final @NotNull SpanOptions options,
       final @Nullable SpanFinishedCallback spanFinishedCallback) {
-    this.context =
-        new SpanContext(
-            traceId, new SpanId(), operation, parentSpanId, transaction.getSamplingDecision());
+    this.context = spanContext;
+    this.context.setOrigin(options.getOrigin());
     this.transaction = Objects.requireNonNull(transaction, "transaction is required");
-    this.hub = Objects.requireNonNull(hub, "hub is required");
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required");
+    this.options = options;
     this.spanFinishedCallback = spanFinishedCallback;
+    final @Nullable SentryDate startTimestamp = options.getStartTimestamp();
     if (startTimestamp != null) {
       this.startTimestamp = startTimestamp;
-      this.startNanos = null;
     } else {
-      this.startTimestamp = DateUtils.getCurrentDateTime();
-      this.startNanos = System.nanoTime();
+      this.startTimestamp = scopes.getOptions().getDateProvider().now();
     }
   }
 
-  @VisibleForTesting
   public Span(
       final @NotNull TransactionContext context,
       final @NotNull SentryTracer sentryTracer,
-      final @NotNull IHub hub,
-      final @Nullable Date startTimestamp) {
+      final @NotNull IScopes scopes,
+      final @NotNull SpanOptions options) {
     this.context = Objects.requireNonNull(context, "context is required");
+    this.context.setOrigin(options.getOrigin());
     this.transaction = Objects.requireNonNull(sentryTracer, "sentryTracer is required");
-    this.hub = Objects.requireNonNull(hub, "hub is required");
+    this.scopes = Objects.requireNonNull(scopes, "scopes are required");
     this.spanFinishedCallback = null;
+    final @Nullable SentryDate startTimestamp = options.getStartTimestamp();
     if (startTimestamp != null) {
       this.startTimestamp = startTimestamp;
-      this.startNanos = null;
     } else {
-      this.startTimestamp = DateUtils.getCurrentDateTime();
-      this.startNanos = System.nanoTime();
+      this.startTimestamp = scopes.getOptions().getDateProvider().now();
     }
+    this.options = options;
   }
 
-  public @NotNull Date getStartTimestamp() {
+  @Override
+  public @NotNull SentryDate getStartDate() {
     return startTimestamp;
   }
 
-  public @Nullable Double getTimestamp() {
+  @Override
+  public @Nullable SentryDate getFinishDate() {
     return timestamp;
   }
 
@@ -117,24 +107,49 @@ public final class Span implements ISpan {
   public @NotNull ISpan startChild(
       final @NotNull String operation,
       final @Nullable String description,
-      final @Nullable Date timestamp,
-      final @NotNull Instrumenter instrumenter) {
-    if (finished.get()) {
+      final @Nullable SentryDate timestamp,
+      final @NotNull Instrumenter instrumenter,
+      @NotNull SpanOptions spanOptions) {
+    if (finished) {
       return NoOpSpan.getInstance();
     }
 
     return transaction.startChild(
-        context.getSpanId(), operation, description, timestamp, instrumenter);
+        context.getSpanId(), operation, description, timestamp, instrumenter, spanOptions);
   }
 
   @Override
   public @NotNull ISpan startChild(
       final @NotNull String operation, final @Nullable String description) {
-    if (finished.get()) {
+    if (finished) {
       return NoOpSpan.getInstance();
     }
 
     return transaction.startChild(context.getSpanId(), operation, description);
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull String operation, @Nullable String description, @NotNull SpanOptions spanOptions) {
+    if (finished) {
+      return NoOpSpan.getInstance();
+    }
+    return transaction.startChild(context.getSpanId(), operation, description, spanOptions);
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull SpanContext spanContext, @NotNull SpanOptions spanOptions) {
+    return transaction.startChild(spanContext, spanOptions);
+  }
+
+  @Override
+  public @NotNull ISpan startChild(
+      @NotNull String operation,
+      @Nullable String description,
+      @Nullable SentryDate timestamp,
+      @NotNull Instrumenter instrumenter) {
+    return startChild(operation, description, timestamp, instrumenter, new SpanOptions());
   }
 
   @Override
@@ -159,17 +174,7 @@ public final class Span implements ISpan {
 
   @Override
   public void finish(@Nullable SpanStatus status) {
-    finish(status, DateUtils.dateToSeconds(DateUtils.getCurrentDateTime()), null);
-  }
-
-  @Override
-  @ApiStatus.Internal
-  public void finish(@Nullable SpanStatus status, @Nullable Date timestamp) {
-    if (timestamp == null) {
-      finish(status);
-    } else {
-      finish(status, DateUtils.dateToSeconds(timestamp), null);
-    }
+    finish(status, scopes.getOptions().getDateProvider().now());
   }
 
   /**
@@ -178,32 +183,57 @@ public final class Span implements ISpan {
    * @param status - status to finish span with
    * @param timestamp - the root span timestamp.
    */
-  void finish(
-      final @Nullable SpanStatus status,
-      final @NotNull Double timestamp,
-      final @Nullable Long endNanos) {
+  @Override
+  public void finish(final @Nullable SpanStatus status, final @Nullable SentryDate timestamp) {
     // the span can be finished only once
-    if (!finished.compareAndSet(false, true)) {
+    if (finished || !isFinishing.compareAndSet(false, true)) {
       return;
     }
 
     this.context.setStatus(status);
-    this.timestamp = timestamp;
+    this.timestamp = timestamp == null ? scopes.getOptions().getDateProvider().now() : timestamp;
+    if (options.isTrimStart() || options.isTrimEnd()) {
+      @Nullable SentryDate minChildStart = null;
+      @Nullable SentryDate maxChildEnd = null;
+
+      // The root span should be trimmed based on all children, but the other spans, like the
+      // jetpack composition should be trimmed based on its direct children only
+      final @NotNull List<Span> children =
+          transaction.getRoot().getSpanId().equals(getSpanId())
+              ? transaction.getChildren()
+              : getDirectChildren();
+      for (final Span child : children) {
+        if (minChildStart == null || child.getStartDate().isBefore(minChildStart)) {
+          minChildStart = child.getStartDate();
+        }
+        if (maxChildEnd == null
+            || (child.getFinishDate() != null && child.getFinishDate().isAfter(maxChildEnd))) {
+          maxChildEnd = child.getFinishDate();
+        }
+      }
+      if (options.isTrimStart()
+          && minChildStart != null
+          && startTimestamp.isBefore(minChildStart)) {
+        updateStartDate(minChildStart);
+      }
+      if (options.isTrimEnd()
+          && maxChildEnd != null
+          && (this.timestamp == null || this.timestamp.isAfter(maxChildEnd))) {
+        updateEndDate(maxChildEnd);
+      }
+    }
+
     if (throwable != null) {
-      hub.setSpanContext(throwable, this, this.transaction.getName());
+      scopes.setSpanContext(throwable, this, this.transaction.getName());
     }
     if (spanFinishedCallback != null) {
       spanFinishedCallback.execute(this);
     }
-    this.endNanos = endNanos == null ? System.nanoTime() : endNanos;
+    finished = true;
   }
 
   @Override
   public void setOperation(final @NotNull String operation) {
-    if (finished.get()) {
-      return;
-    }
-
     this.context.setOperation(operation);
   }
 
@@ -214,10 +244,6 @@ public final class Span implements ISpan {
 
   @Override
   public void setDescription(final @Nullable String description) {
-    if (finished.get()) {
-      return;
-    }
-
     this.context.setDescription(description);
   }
 
@@ -228,10 +254,6 @@ public final class Span implements ISpan {
 
   @Override
   public void setStatus(final @Nullable SpanStatus status) {
-    if (finished.get()) {
-      return;
-    }
-
     this.context.setStatus(status);
   }
 
@@ -247,10 +269,6 @@ public final class Span implements ISpan {
 
   @Override
   public void setTag(final @NotNull String key, final @NotNull String value) {
-    if (finished.get()) {
-      return;
-    }
-
     this.context.setTag(key, value);
   }
 
@@ -261,13 +279,14 @@ public final class Span implements ISpan {
 
   @Override
   public boolean isFinished() {
-    return finished.get();
+    return finished;
   }
 
   public @NotNull Map<String, Object> getData() {
     return data;
   }
 
+  @Override
   public @Nullable Boolean isSampled() {
     return context.getSampled();
   }
@@ -276,16 +295,13 @@ public final class Span implements ISpan {
     return context.getProfileSampled();
   }
 
+  @Override
   public @Nullable TracesSamplingDecision getSamplingDecision() {
     return context.getSamplingDecision();
   }
 
   @Override
   public void setThrowable(final @Nullable Throwable throwable) {
-    if (finished.get()) {
-      return;
-    }
-
     this.throwable = throwable;
   }
 
@@ -312,33 +328,70 @@ public final class Span implements ISpan {
   }
 
   @Override
-  public void setData(@NotNull String key, @NotNull Object value) {
-    if (finished.get()) {
-      return;
-    }
-
+  public void setData(final @NotNull String key, final @NotNull Object value) {
     data.put(key, value);
   }
 
   @Override
-  public @Nullable Object getData(@NotNull String key) {
+  public @Nullable Object getData(final @NotNull String key) {
     return data.get(key);
   }
 
   @Override
-  public void setMeasurement(@NotNull String name, @NotNull Number value) {
-    this.transaction.setMeasurement(name, value);
+  public void setMeasurement(final @NotNull String name, final @NotNull Number value) {
+    if (isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              SentryLevel.DEBUG,
+              "The span is already finished. Measurement %s cannot be set",
+              name);
+      return;
+    }
+    this.measurements.put(name, new MeasurementValue(value, null));
+    // We set the measurement in the transaction, too, but we have to check if this is the root span
+    // of the transaction, to avoid an infinite recursion
+    if (transaction.getRoot() != this) {
+      transaction.setMeasurementFromChild(name, value);
+    }
   }
 
   @Override
   public void setMeasurement(
-      @NotNull String name, @NotNull Number value, @NotNull MeasurementUnit unit) {
-    this.transaction.setMeasurement(name, value, unit);
+      final @NotNull String name,
+      final @NotNull Number value,
+      final @NotNull MeasurementUnit unit) {
+    if (isFinished()) {
+      scopes
+          .getOptions()
+          .getLogger()
+          .log(
+              SentryLevel.DEBUG,
+              "The span is already finished. Measurement %s cannot be set",
+              name);
+      return;
+    }
+    this.measurements.put(name, new MeasurementValue(value, unit.apiName()));
+    // We set the measurement in the transaction, too, but we have to check if this is the root span
+    // of the transaction, to avoid an infinite recursion
+    if (transaction.getRoot() != this) {
+      transaction.setMeasurementFromChild(name, value, unit);
+    }
   }
 
-  @Nullable
-  Long getEndNanos() {
-    return endNanos;
+  @NotNull
+  public Map<String, MeasurementValue> getMeasurements() {
+    return measurements;
+  }
+
+  @Override
+  public boolean updateEndDate(final @NotNull SentryDate date) {
+    if (this.timestamp != null) {
+      this.timestamp = date;
+      return true;
+    }
+    return false;
   }
 
   @Override
@@ -346,42 +399,50 @@ public final class Span implements ISpan {
     return false;
   }
 
+  @Override
+  public void setContext(@NotNull String key, @NotNull Object context) {
+    this.contexts.put(key, context);
+  }
+
+  @Override
+  public @NotNull Contexts getContexts() {
+    return contexts;
+  }
+
   void setSpanFinishedCallback(final @Nullable SpanFinishedCallback callback) {
     this.spanFinishedCallback = callback;
   }
 
-  public @Nullable Double getHighPrecisionTimestamp() {
-    return getHighPrecisionTimestamp(endNanos);
-  }
-
-  /**
-   * Returns high precision span finish time represented as {@link Double}.
-   *
-   * @return high precision span finish time
-   */
-  @SuppressWarnings("JavaUtilDate")
   @Nullable
-  Double getHighPrecisionTimestamp(final @Nullable Long endNanos) {
-    final Double duration = getDurationInMillis(endNanos);
-    if (duration != null) {
-      return DateUtils.millisToSeconds(startTimestamp.getTime() + duration);
-    } else if (timestamp != null) {
-      return timestamp;
-    } else {
-      return null;
-    }
+  SpanFinishedCallback getSpanFinishedCallback() {
+    return spanFinishedCallback;
   }
 
-  /**
-   * Returns span duration in milliseconds or {@code null} when {@link #startNanos} is not set.
-   *
-   * @return span duration in milliseconds
-   */
-  private @Nullable Double getDurationInMillis(final @Nullable Long endNanos) {
-    if (startNanos != null && endNanos != null) {
-      return DateUtils.nanosToMillis(endNanos - startNanos);
-    } else {
-      return null;
+  private void updateStartDate(@NotNull SentryDate date) {
+    this.startTimestamp = date;
+  }
+
+  @NotNull
+  SpanOptions getOptions() {
+    return options;
+  }
+
+  @NotNull
+  private List<Span> getDirectChildren() {
+    final List<Span> children = new ArrayList<>();
+    final Iterator<Span> iterator = transaction.getSpans().iterator();
+
+    while (iterator.hasNext()) {
+      final Span span = iterator.next();
+      if (span.getParentSpanId() != null && span.getParentSpanId().equals(getSpanId())) {
+        children.add(span);
+      }
     }
+    return children;
+  }
+
+  @Override
+  public @NotNull ISentryLifecycleToken makeCurrent() {
+    return NoOpScopesLifecycleToken.getInstance();
   }
 }

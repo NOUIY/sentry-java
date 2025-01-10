@@ -1,18 +1,20 @@
 package io.sentry;
 
-import static io.sentry.SentryLevel.ERROR;
+import static io.sentry.util.IntegrationUtils.addIntegrationToSdkVersion;
 
+import com.jakewharton.nopen.annotation.Open;
 import io.sentry.exception.ExceptionMechanismException;
-import io.sentry.hints.DiskFlushNotification;
-import io.sentry.hints.Flushable;
+import io.sentry.hints.BlockingFlushHint;
+import io.sentry.hints.EventDropReason;
 import io.sentry.hints.SessionEnd;
+import io.sentry.hints.TransactionEnd;
 import io.sentry.protocol.Mechanism;
 import io.sentry.protocol.SentryId;
 import io.sentry.util.HintUtils;
 import io.sentry.util.Objects;
 import java.io.Closeable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
@@ -26,7 +28,7 @@ public final class UncaughtExceptionHandlerIntegration
   /** Reference to the pre-existing uncaught exception handler. */
   private @Nullable Thread.UncaughtExceptionHandler defaultExceptionHandler;
 
-  private @Nullable IHub hub;
+  private @Nullable IScopes scopes;
   private @Nullable SentryOptions options;
 
   private boolean registered = false;
@@ -41,7 +43,7 @@ public final class UncaughtExceptionHandlerIntegration
   }
 
   @Override
-  public final void register(final @NotNull IHub hub, final @NotNull SentryOptions options) {
+  public final void register(final @NotNull IScopes scopes, final @NotNull SentryOptions options) {
     if (registered) {
       options
           .getLogger()
@@ -52,7 +54,7 @@ public final class UncaughtExceptionHandlerIntegration
     }
     registered = true;
 
-    this.hub = Objects.requireNonNull(hub, "Hub is required");
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required");
     this.options = Objects.requireNonNull(options, "SentryOptions is required");
 
     this.options
@@ -73,7 +75,14 @@ public final class UncaughtExceptionHandlerIntegration
                 "default UncaughtExceptionHandler class='"
                     + currentHandler.getClass().getName()
                     + "'");
-        defaultExceptionHandler = currentHandler;
+
+        if (currentHandler instanceof UncaughtExceptionHandlerIntegration) {
+          final UncaughtExceptionHandlerIntegration currentHandlerIntegration =
+              (UncaughtExceptionHandlerIntegration) currentHandler;
+          defaultExceptionHandler = currentHandlerIntegration.defaultExceptionHandler;
+        } else {
+          defaultExceptionHandler = currentHandler;
+        }
       }
 
       threadAdapter.setDefaultUncaughtExceptionHandler(this);
@@ -81,12 +90,13 @@ public final class UncaughtExceptionHandlerIntegration
       this.options
           .getLogger()
           .log(SentryLevel.DEBUG, "UncaughtExceptionHandlerIntegration installed.");
+      addIntegrationToSdkVersion("UncaughtExceptionHandler");
     }
   }
 
   @Override
   public void uncaughtException(Thread thread, Throwable thrown) {
-    if (options != null && hub != null) {
+    if (options != null && scopes != null) {
       options.getLogger().log(SentryLevel.INFO, "Uncaught exception received.");
 
       try {
@@ -96,11 +106,20 @@ public final class UncaughtExceptionHandlerIntegration
         final SentryEvent event = new SentryEvent(throwable);
         event.setLevel(SentryLevel.FATAL);
 
+        final ITransaction transaction = scopes.getTransaction();
+        if (transaction == null && event.getEventId() != null) {
+          // if there's no active transaction on scope, this event can trigger flush notification
+          exceptionHint.setFlushable(event.getEventId());
+        }
         final Hint hint = HintUtils.createWithTypeCheckHint(exceptionHint);
 
-        final @NotNull SentryId sentryId = hub.captureEvent(event, hint);
+        final @NotNull SentryId sentryId = scopes.captureEvent(event, hint);
         final boolean isEventDropped = sentryId.equals(SentryId.EMPTY_ID);
-        if (!isEventDropped) {
+        final EventDropReason eventDropReason = HintUtils.getEventDropReason(hint);
+        // in case the event has been dropped by multithreaded deduplicator, the other threads will
+        // crash the app without a chance to persist the main event so we have to special-case this
+        if (!isEventDropped
+            || EventDropReason.MULTITHREADED_DEDUPLICATION.equals(eventDropReason)) {
           // Block until the event is flushed to disk
           if (!exceptionHint.waitFlush()) {
             options
@@ -149,33 +168,26 @@ public final class UncaughtExceptionHandlerIntegration
     }
   }
 
-  private static final class UncaughtExceptionHint
-      implements DiskFlushNotification, Flushable, SessionEnd {
+  @Open // open for tests
+  @ApiStatus.Internal
+  public static class UncaughtExceptionHint extends BlockingFlushHint
+      implements SessionEnd, TransactionEnd {
 
-    private final CountDownLatch latch;
-    private final long flushTimeoutMillis;
-    private final @NotNull ILogger logger;
+    private final AtomicReference<SentryId> flushableEventId = new AtomicReference<>();
 
-    UncaughtExceptionHint(final long flushTimeoutMillis, final @NotNull ILogger logger) {
-      this.flushTimeoutMillis = flushTimeoutMillis;
-      latch = new CountDownLatch(1);
-      this.logger = logger;
+    public UncaughtExceptionHint(final long flushTimeoutMillis, final @NotNull ILogger logger) {
+      super(flushTimeoutMillis, logger);
     }
 
     @Override
-    public boolean waitFlush() {
-      try {
-        return latch.await(flushTimeoutMillis, TimeUnit.MILLISECONDS);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        logger.log(ERROR, "Exception while awaiting for flush in UncaughtExceptionHint", e);
-      }
-      return false;
+    public boolean isFlushable(final @Nullable SentryId eventId) {
+      final SentryId unwrapped = flushableEventId.get();
+      return unwrapped != null && unwrapped.equals(eventId);
     }
 
     @Override
-    public void markFlushed() {
-      latch.countDown();
+    public void setFlushable(final @NotNull SentryId eventId) {
+      flushableEventId.set(eventId);
     }
   }
 }

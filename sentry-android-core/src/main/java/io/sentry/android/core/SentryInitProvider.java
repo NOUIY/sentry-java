@@ -1,19 +1,17 @@
 package io.sentry.android.core;
 
-import android.content.ContentProvider;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.ProviderInfo;
-import android.database.Cursor;
 import android.net.Uri;
 import io.sentry.Sentry;
+import io.sentry.SentryIntegrationPackageStorage;
 import io.sentry.SentryLevel;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 @ApiStatus.Internal
-public final class SentryInitProvider extends ContentProvider {
+public final class SentryInitProvider extends EmptySecureContentProvider {
 
   @Override
   public boolean onCreate() {
@@ -25,6 +23,7 @@ public final class SentryInitProvider extends ContentProvider {
     }
     if (ManifestMetadataReader.isAutoInit(context, logger)) {
       SentryAndroid.init(context, logger);
+      SentryIntegrationPackageStorage.getInstance().addIntegration("AutoInit");
     }
     return true;
   }
@@ -45,36 +44,7 @@ public final class SentryInitProvider extends ContentProvider {
   }
 
   @Override
-  public @Nullable Cursor query(
-      @NotNull Uri uri,
-      @Nullable String[] strings,
-      @Nullable String s,
-      @Nullable String[] strings1,
-      @Nullable String s1) {
-    return null;
-  }
-
-  @Override
   public @Nullable String getType(@NotNull Uri uri) {
     return null;
-  }
-
-  @Override
-  public @Nullable Uri insert(@NotNull Uri uri, @Nullable ContentValues contentValues) {
-    return null;
-  }
-
-  @Override
-  public int delete(@NotNull Uri uri, @Nullable String s, @Nullable String[] strings) {
-    return 0;
-  }
-
-  @Override
-  public int update(
-      @NotNull Uri uri,
-      @Nullable ContentValues contentValues,
-      @Nullable String s,
-      @Nullable String[] strings) {
-    return 0;
   }
 }

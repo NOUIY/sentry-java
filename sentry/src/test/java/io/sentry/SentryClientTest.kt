@@ -1,13 +1,19 @@
 package io.sentry
 
+import io.sentry.Scope.IWithPropagationContext
+import io.sentry.SentryLevel.WARNING
+import io.sentry.Session.State.Crashed
 import io.sentry.clientreport.ClientReportTestHelper.Companion.assertClientReport
 import io.sentry.clientreport.DiscardReason
 import io.sentry.clientreport.DiscardedEvent
-import io.sentry.clientreport.DropEverythingEventProcessor
 import io.sentry.exception.SentryEnvelopeException
+import io.sentry.hints.AbnormalExit
 import io.sentry.hints.ApplyScopeData
+import io.sentry.hints.Backfillable
 import io.sentry.hints.Cached
 import io.sentry.hints.DiskFlushNotification
+import io.sentry.hints.TransactionEnd
+import io.sentry.protocol.Contexts
 import io.sentry.protocol.Mechanism
 import io.sentry.protocol.Request
 import io.sentry.protocol.SdkVersion
@@ -15,11 +21,14 @@ import io.sentry.protocol.SentryException
 import io.sentry.protocol.SentryId
 import io.sentry.protocol.SentryTransaction
 import io.sentry.protocol.User
+import io.sentry.protocol.ViewHierarchy
 import io.sentry.test.callMethod
 import io.sentry.transport.ITransport
 import io.sentry.transport.ITransportGate
 import io.sentry.util.HintUtils
 import org.junit.Assert.assertArrayEquals
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.argumentCaptor
@@ -30,11 +39,11 @@ import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.mockingDetails
 import org.mockito.kotlin.never
-import org.mockito.kotlin.spy
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.verifyNoMoreInteractions
 import org.mockito.kotlin.whenever
+import org.msgpack.core.MessagePack
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -43,6 +52,7 @@ import java.io.InputStreamReader
 import java.nio.charset.Charset
 import java.nio.file.Files
 import java.util.Arrays
+import java.util.LinkedList
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -57,11 +67,14 @@ import kotlin.test.assertTrue
 
 class SentryClientTest {
 
+    @get:Rule
+    val tmpDir = TemporaryFolder()
+
     class Fixture {
         var transport = mock<ITransport>()
         var factory = mock<ITransportFactory>()
         val maxAttachmentSize: Long = (5 * 1024 * 1024).toLong()
-        val hub = mock<IHub>()
+        val scopes = mock<IScopes>()
         val sentryTracer: SentryTracer
 
         var sentryOptions: SentryOptions = SentryOptions().apply {
@@ -79,8 +92,9 @@ class SentryClientTest {
 
         init {
             whenever(factory.create(any(), any())).thenReturn(transport)
-            whenever(hub.options).thenReturn(sentryOptions)
-            sentryTracer = SentryTracer(TransactionContext("a-transaction", "op"), hub)
+            whenever(scopes.options).thenReturn(sentryOptions)
+            sentryTracer = SentryTracer(TransactionContext("a-transaction", "op", TracesSamplingDecision(true)), scopes)
+            sentryTracer.startChild("a-span", "span 1").finish()
         }
 
         var attachment = Attachment("hello".toByteArray(), "hello.txt", "text/plain", true)
@@ -129,6 +143,25 @@ class SentryClientTest {
         fixture.sentryOptions.dsn = dsnStringLegacy
         val sut = fixture.getSut()
         assertTrue(sut.isEnabled)
+    }
+
+    @Test
+    fun `when client is closed with isRestarting false, transport waits`() {
+        val sut = fixture.getSut()
+        assertTrue(sut.isEnabled)
+        sut.close(false)
+        assertNotEquals(0, fixture.sentryOptions.shutdownTimeoutMillis)
+        verify(fixture.transport).flush(eq(fixture.sentryOptions.shutdownTimeoutMillis))
+        verify(fixture.transport).close(eq(false))
+    }
+
+    @Test
+    fun `when client is closed with isRestarting true, transport does not wait`() {
+        val sut = fixture.getSut()
+        assertTrue(sut.isEnabled)
+        sut.close(true)
+        verify(fixture.transport).flush(eq(0))
+        verify(fixture.transport).close(eq(true))
     }
 
     @Test
@@ -193,21 +226,21 @@ class SentryClientTest {
     }
 
     @Test
-    fun `when beforeSend throws an exception, breadcrumb is added and event is sent`() {
+    fun `when beforeSend throws an exception, event is dropped`() {
         val exception = Exception("test")
 
         exception.stackTrace.toString()
         fixture.sentryOptions.setBeforeSend { _, _ -> throw exception }
         val sut = fixture.getSut()
         val actual = SentryEvent()
-        sut.captureEvent(actual)
+        val id = sut.captureEvent(actual)
 
-        assertNotNull(actual.breadcrumbs) {
-            assertEquals("test", it.first().data["sentry:message"])
-            assertEquals("SentryClient", it.first().category)
-            assertEquals(SentryLevel.ERROR, it.first().level)
-            assertEquals("BeforeSend callback failed.", it.first().message)
-        }
+        assertEquals(SentryId.EMPTY_ID, id)
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Error.category, 1))
+        )
     }
 
     @Test
@@ -232,7 +265,7 @@ class SentryClientTest {
             parameterTypes = arrayOf(
                 String::class.java,
                 SentryLevel::class.java,
-                Scope::class.java
+                IScope::class.java
             ),
             actual,
             null,
@@ -530,6 +563,95 @@ class SentryClientTest {
     }
 
     @Test
+    fun `when captureCheckIn, envelope is sent`() {
+        val sut = fixture.getSut()
+
+        sut.captureCheckIn(checkIn, null, null)
+
+        verify(fixture.transport).send(
+            check { actual ->
+                assertEquals(checkIn.checkInId, actual.header.eventId)
+                assertEquals(fixture.sentryOptions.sdkVersion, actual.header.sdkVersion)
+
+                assertEquals(1, actual.items.count())
+                val item = actual.items.first()
+                assertEquals(SentryItemType.CheckIn, item.header.type)
+                assertEquals("application/json", item.header.contentType)
+
+                assertEnvelopeItemDataForCheckIn(item)
+            },
+            any<Hint>()
+        )
+    }
+
+    @Test
+    fun `when captureCheckIn, envelope is sent if ignored slug does not match`() {
+        val sut = fixture.getSut { options ->
+            options.setIgnoredCheckIns(listOf("non_matching_slug"))
+        }
+
+        sut.captureCheckIn(checkIn, null, null)
+
+        verify(fixture.transport).send(
+            check { actual ->
+                assertEquals(checkIn.checkInId, actual.header.eventId)
+                assertEquals(fixture.sentryOptions.sdkVersion, actual.header.sdkVersion)
+
+                assertEquals(1, actual.items.count())
+                val item = actual.items.first()
+                assertEquals(SentryItemType.CheckIn, item.header.type)
+                assertEquals("application/json", item.header.contentType)
+
+                assertEnvelopeItemDataForCheckIn(item)
+            },
+            any<Hint>()
+        )
+    }
+
+    @Test
+    fun `when captureCheckIn, envelope is not sent if slug is ignored`() {
+        val sut = fixture.getSut { options ->
+            options.setIgnoredCheckIns(listOf("some_slug"))
+        }
+
+        sut.captureCheckIn(checkIn, null, null)
+
+        verify(fixture.transport, never()).send(
+            any(),
+            any<Hint>()
+        )
+    }
+
+    private fun assertEnvelopeItemDataForCheckIn(item: SentryEnvelopeItem) {
+        val stream = ByteArrayOutputStream()
+        val writer = stream.bufferedWriter(Charset.forName("UTF-8"))
+        fixture.sentryOptions.serializer.serialize(checkIn, writer)
+        val expectedData = stream.toByteArray()
+        assertTrue(Arrays.equals(expectedData, item.data))
+    }
+
+    @Test
+    fun `when captureCheckIn and connection throws, log exception`() {
+        val sut = fixture.getSut()
+
+        val exception = IOException("No connection")
+        whenever(fixture.transport.send(any(), any())).thenThrow(exception)
+
+        val logger = mock<ILogger>()
+        fixture.sentryOptions.setLogger(logger)
+
+        sut.captureCheckIn(checkIn, null, null)
+
+        verify(logger)
+            .log(
+                SentryLevel.WARNING,
+                exception,
+                "Capturing check-in %s failed.",
+                checkIn.checkInId
+            )
+    }
+
+    @Test
     fun `when hint is Cached, scope is not applied`() {
         val sut = fixture.getSut()
 
@@ -690,8 +812,127 @@ class SentryClientTest {
 
         assertClientReport(
             fixture.sentryOptions.clientReportRecorder,
-            listOf(DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Transaction.category, 1))
+            listOf(
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Span.category, 2)
+            )
         )
+    }
+
+    @Test
+    fun `transaction dropped by ignoredTransactions is recorded`() {
+        fixture.sentryOptions.setIgnoredTransactions(listOf("a-transaction"))
+
+        val transaction = SentryTransaction(fixture.sentryTracer)
+
+        val eventId =
+            fixture.getSut().captureTransaction(transaction, fixture.sentryTracer.traceContext())
+
+        verify(fixture.transport, never()).send(any(), anyOrNull())
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Span.category, 2)
+            )
+        )
+
+        assertEquals(SentryId.EMPTY_ID, eventId)
+    }
+
+    @Test
+    fun `transaction dropped by ignoredTransactions with regex is recorded`() {
+        fixture.sentryOptions.setIgnoredTransactions(listOf("a.*action"))
+
+        val transaction = SentryTransaction(fixture.sentryTracer)
+
+        val eventId =
+            fixture.getSut().captureTransaction(transaction, fixture.sentryTracer.traceContext())
+
+        verify(fixture.transport, never()).send(any(), anyOrNull())
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Span.category, 2)
+            )
+        )
+
+        assertEquals(SentryId.EMPTY_ID, eventId)
+    }
+
+    @Test
+    fun `backfillable events are only wired through backfilling processors`() {
+        val backfillingProcessor = mock<BackfillingEventProcessor>()
+        val nonBackfillingProcessor = mock<EventProcessor>()
+        fixture.sentryOptions.addEventProcessor(backfillingProcessor)
+        fixture.sentryOptions.addEventProcessor(nonBackfillingProcessor)
+
+        val event = SentryEvent()
+        val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+
+        fixture.getSut().captureEvent(event, hint)
+
+        verify(backfillingProcessor).process(eq(event), eq(hint))
+        verify(nonBackfillingProcessor, never()).process(any<SentryEvent>(), anyOrNull())
+    }
+
+    @Test
+    fun `scope is not applied to backfillable events`() {
+        val event = SentryEvent()
+        val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+        val scope = createScope()
+
+        fixture.getSut().captureEvent(event, scope, hint)
+
+        assertNull(event.user)
+        assertNull(event.level)
+        assertNull(event.breadcrumbs)
+        assertNull(event.request)
+    }
+
+    @Test
+    fun `tracingContext values are derived from backfillable events`() {
+        val traceId = SentryId(UUID.randomUUID())
+        val event = SentryEvent().apply {
+            environment = "release"
+            release = "io.sentry.samples@22.1.1"
+            contexts[Contexts.REPLAY_ID] = "64cf554cc8d74c6eafa3e08b7c984f6d"
+            contexts.setTrace(SpanContext(traceId, SpanId(), "ui.load", null, null))
+            transaction = "MainActivity"
+        }
+        val hint = HintUtils.createWithTypeCheckHint(BackfillableHint())
+        val scope = createScope()
+
+        fixture.getSut().captureEvent(event, scope, hint)
+
+        verify(fixture.transport).send(
+            check {
+                assertEquals("release", it.header.traceContext!!.environment)
+                assertEquals("io.sentry.samples@22.1.1", it.header.traceContext!!.release)
+                assertEquals(traceId, it.header.traceContext!!.traceId)
+                assertEquals("MainActivity", it.header.traceContext!!.transaction)
+                assertEquals(SentryId("64cf554cc8d74c6eafa3e08b7c984f6d"), it.header.traceContext!!.replayId)
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `non-backfillable events are only wired through regular processors`() {
+        val backfillingProcessor = mock<BackfillingEventProcessor>()
+        val nonBackfillingProcessor = mock<EventProcessor>()
+        fixture.sentryOptions.addEventProcessor(backfillingProcessor)
+        fixture.sentryOptions.addEventProcessor(nonBackfillingProcessor)
+
+        val event = SentryEvent()
+
+        fixture.getSut().captureEvent(event)
+
+        verify(backfillingProcessor, never()).process(any<SentryEvent>(), anyOrNull())
+        verify(nonBackfillingProcessor).process(eq(event), anyOrNull())
     }
 
     @Test
@@ -706,7 +947,10 @@ class SentryClientTest {
 
         assertClientReport(
             fixture.sentryOptions.clientReportRecorder,
-            listOf(DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Transaction.category, 1))
+            listOf(
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Span.category, 2)
+            )
         )
     }
 
@@ -722,7 +966,36 @@ class SentryClientTest {
 
         assertClientReport(
             fixture.sentryOptions.clientReportRecorder,
-            listOf(DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Transaction.category, 1))
+            listOf(
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Span.category, 2)
+            )
+        )
+    }
+
+    @Test
+    fun `span dropped by event processor is recorded`() {
+        fixture.sentryTracer.startChild("dropped span", "span1").finish()
+        fixture.sentryTracer.startChild("dropped span", "span2").finish()
+        val transaction = SentryTransaction(fixture.sentryTracer)
+        val scope = createScope()
+        scope.addEventProcessor(object : EventProcessor {
+            override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
+                // we are removing span1 and a-span from the fixture
+                transaction.spans.removeIf { it.description != "span2" }
+                return transaction
+            }
+        })
+
+        fixture.getSut().captureTransaction(transaction, scope, null)
+
+        verify(fixture.transport).send(any(), anyOrNull())
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Span.category, 2)
+            )
         )
     }
 
@@ -782,7 +1055,10 @@ class SentryClientTest {
 
         assertClientReport(
             fixture.sentryOptions.clientReportRecorder,
-            listOf(DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Transaction.category, 1))
+            listOf(
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Span.category, 2)
+            )
         )
     }
 
@@ -807,21 +1083,48 @@ class SentryClientTest {
     }
 
     @Test
-    fun `when beforeSendTransaction throws an exception, breadcrumb is added and event is sent`() {
+    fun `when beforeSendTransaction throws an exception, transaction is dropped`() {
         val exception = Exception("test")
 
         exception.stackTrace.toString()
         fixture.sentryOptions.setBeforeSendTransaction { _, _ -> throw exception }
 
         val transaction = SentryTransaction(fixture.sentryTracer)
+        val id = fixture.getSut().captureTransaction(transaction, fixture.sentryTracer.traceContext())
+
+        assertEquals(SentryId.EMPTY_ID, id)
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Transaction.category, 1),
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Span.category, 2)
+            )
+        )
+    }
+
+    @Test
+    fun `when beforeSendTransaction drops a span, dropped span is recorded`() {
+        fixture.sentryTracer.startChild("dropped span", "span1").finish()
+        fixture.sentryTracer.startChild("dropped span", "span2").finish()
+        fixture.sentryOptions.setBeforeSendTransaction { t: SentryTransaction, _: Any? ->
+            t.apply {
+                // we are removing span1 and a-span from the fixture
+                spans.removeIf { it.description != "span2" }
+            }
+        }
+
+        val transaction = SentryTransaction(fixture.sentryTracer)
         fixture.getSut().captureTransaction(transaction, fixture.sentryTracer.traceContext())
 
-        assertNotNull(transaction.breadcrumbs) {
-            assertEquals("test", it.first().data["sentry:message"])
-            assertEquals("SentryClient", it.first().category)
-            assertEquals(SentryLevel.ERROR, it.first().level)
-            assertEquals("BeforeSendTransaction callback failed.", it.first().message)
-        }
+        verify(fixture.transport).send(any(), anyOrNull())
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Span.category, 2)
+            )
+        )
     }
 
     @Test
@@ -875,6 +1178,21 @@ class SentryClientTest {
         fixture.getSut().updateSessionData(event, Hint(), scope)
         scope.withSession {
             assertEquals(Session.State.Crashed, it!!.status)
+        }
+    }
+
+    @Test
+    fun `When event is non handled, end the session`() {
+        val scope = Scope(fixture.sentryOptions)
+        scope.startSession()
+
+        val event = SentryEvent().apply {
+            exceptions = createNonHandledException()
+        }
+        fixture.getSut().updateSessionData(event, Hint(), scope)
+        scope.withSession {
+            assertEquals(Session.State.Crashed, it!!.status)
+            assertNotNull(it.duration)
         }
     }
 
@@ -937,6 +1255,37 @@ class SentryClientTest {
                 scope
             )
             assertEquals(errorCount, session.errorCount())
+        }
+    }
+
+    @Test
+    fun `when event has abnormal hint, sets abnormalMechanism and changes status to abnormal`() {
+        val scope = givenScopeWithStartedSession()
+        val event = SentryEvent().apply {
+            exceptions = listOf(SentryException())
+        }
+        val hint = HintUtils.createWithTypeCheckHint(AbnormalHint("anr_foreground"))
+
+        fixture.getSut().updateSessionData(event, hint, scope)
+
+        scope.withSession {
+            assertEquals(Session.State.Abnormal, it!!.status)
+            assertEquals("anr_foreground", it.abnormalMechanism)
+        }
+    }
+
+    @Test
+    fun `when event has abnormal hint, increases errorCrount`() {
+        val scope = givenScopeWithStartedSession()
+        val event = SentryEvent().apply {
+            exceptions = listOf(SentryException())
+        }
+        val hint = HintUtils.createWithTypeCheckHint(AbnormalHint("anr_foreground"))
+
+        fixture.getSut().updateSessionData(event, hint, scope)
+
+        scope.withSession {
+            assertEquals(1, it!!.errorCount())
         }
     }
 
@@ -1025,6 +1374,28 @@ class SentryClientTest {
                     val event = getEventFromData(it.items.first().data)
                     val map = event.contexts["key"] as Map<*, *>
                     assertEquals("abc", map["value"])
+                },
+                anyOrNull()
+            )
+        }
+    }
+
+    @Test
+    fun `when session is in terminal state, does not send session update`() {
+        val sut = fixture.getSut()
+
+        val event = SentryEvent().apply {
+            exceptions = createNonHandledException()
+        }
+        val scope = Scope(fixture.sentryOptions)
+        val sessionPair = scope.startSession()
+        scope.withSession { it!!.update(Crashed, null, false) }
+
+        assertNotNull(sessionPair) {
+            sut.captureEvent(event, scope, null)
+            verify(fixture.transport).send(
+                check {
+                    assertNull(it.items.find { item -> item.header.type == SentryItemType.Session })
                 },
                 anyOrNull()
             )
@@ -1138,23 +1509,6 @@ class SentryClientTest {
     }
 
     @Test
-    fun `captureTransaction with profile calls captureEnvelope and captureTransaction`() {
-        val transaction = SentryTransaction(fixture.sentryTracer)
-        val client = spy(fixture.getSut())
-        client.captureTransaction(transaction, null, null, null, fixture.profilingTraceData)
-        verify(client).captureTransaction(transaction, null, null, null)
-        verify(client).captureEnvelope(
-            check {
-                assertEquals(1, it.items.count())
-                assertEnvelopeItem<ProfilingTraceData>(it.items.toList()) { _, item ->
-                    assertEquals(item.profileId, fixture.profilingTraceData.profileId)
-                }
-            },
-            anyOrNull()
-        )
-    }
-
-    @Test
     fun `when capture profile with empty trace file, profile is not sent`() {
         val client = fixture.getSut()
         val options = fixture.sentryOptions
@@ -1218,9 +1572,9 @@ class SentryClientTest {
 
     @Test
     fun `when captureTransaction with scope, transaction should use user data`() {
-        val hub: IHub = mock()
-        whenever(hub.options).thenReturn(SentryOptions())
-        val transaction = SentryTransaction(SentryTracer(TransactionContext("tx", "op"), hub))
+        val scopes: IScopes = mock()
+        whenever(scopes.options).thenReturn(SentryOptions())
+        val transaction = SentryTransaction(SentryTracer(TransactionContext("tx", "op"), scopes))
         val scope = createScope()
 
         val sut = fixture.getSut()
@@ -1249,7 +1603,7 @@ class SentryClientTest {
         val event = SentryEvent()
         val sut = fixture.getSut()
         val scope = createScope()
-        val transaction = SentryTracer(TransactionContext("a-transaction", "op"), fixture.hub)
+        val transaction = SentryTracer(TransactionContext("a-transaction", "op"), fixture.scopes)
         scope.setTransaction(transaction)
         val span = transaction.startChild("op")
         sut.captureEvent(event, scope)
@@ -1277,12 +1631,14 @@ class SentryClientTest {
     }
 
     @Test
-    fun `when scope does not have an active transaction, trace state is not set on the envelope`() {
+    fun `when scope does not have an active transaction, trace state is set on the envelope from scope`() {
         val sut = fixture.getSut()
-        sut.captureEvent(SentryEvent(), createScope())
+        val scope = createScope()
+        sut.captureEvent(SentryEvent(), scope)
         verify(fixture.transport).send(
             check {
-                assertNull(it.header.traceContext)
+                assertNotNull(it.header.traceContext)
+                assertEquals(scope.propagationContext.traceId, it.header.traceContext?.traceId)
             },
             anyOrNull()
         )
@@ -1318,7 +1674,7 @@ class SentryClientTest {
         fixture.sentryOptions.release = "optionsRelease"
         fixture.sentryOptions.environment = "optionsEnvironment"
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         transaction.release = "transactionRelease"
         transaction.environment = "transactionEnvironment"
@@ -1331,7 +1687,7 @@ class SentryClientTest {
     fun `when transaction does not have SDK version set, and the SDK version is set on options, options values are applied to transactions`() {
         fixture.sentryOptions.sdkVersion = SdkVersion("sdk.name", "version")
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         sut.captureTransaction(transaction, sentryTracer.traceContext())
         assertEquals(fixture.sentryOptions.sdkVersion, transaction.sdk)
@@ -1341,7 +1697,7 @@ class SentryClientTest {
     fun `when transaction has SDK version set, and the SDK version is set on options, options values are not applied to transactions`() {
         fixture.sentryOptions.sdkVersion = SdkVersion("sdk.name", "version")
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         val sdkVersion = SdkVersion("transaction.sdk.name", "version")
         transaction.sdk = sdkVersion
@@ -1353,7 +1709,7 @@ class SentryClientTest {
     fun `when transaction does not have tags, and tags are set on options, options values are applied to transactions`() {
         fixture.sentryOptions.setTag("tag1", "value1")
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         sut.captureTransaction(transaction, sentryTracer.traceContext())
         assertEquals(mapOf("tag1" to "value1"), transaction.tags)
@@ -1364,7 +1720,7 @@ class SentryClientTest {
         fixture.sentryOptions.setTag("tag1", "value1")
         fixture.sentryOptions.setTag("tag2", "value2")
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         transaction.setTag("tag3", "value3")
         transaction.setTag("tag2", "transaction-tag")
@@ -1378,7 +1734,7 @@ class SentryClientTest {
     @Test
     fun `captured transactions without a platform, have the default platform set`() {
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         sut.captureTransaction(transaction, sentryTracer.traceContext())
         assertEquals("java", transaction.platform)
@@ -1387,7 +1743,7 @@ class SentryClientTest {
     @Test
     fun `captured transactions with a platform, do not get the platform overwritten`() {
         val sut = fixture.getSut()
-        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.hub)
+        val sentryTracer = SentryTracer(TransactionContext("name", "op"), fixture.scopes)
         val transaction = SentryTransaction(sentryTracer)
         transaction.platform = "abc"
         sut.captureTransaction(transaction, sentryTracer.traceContext())
@@ -1427,6 +1783,78 @@ class SentryClientTest {
         val sut = fixture.getSut()
         val attachment = Attachment.fromScreenshot(byteArrayOf())
         val hint = Hint().also { it.screenshot = attachment }
+
+        sut.captureEvent(SentryEvent(), hint)
+
+        verify(fixture.transport).send(
+            check { envelope ->
+                assertEquals(1, envelope.items.count())
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `view hierarchy is added to the envelope from the hint`() {
+        val sut = fixture.getSut()
+        val attachment = Attachment.fromViewHierarchy(ViewHierarchy("android_view_system", emptyList()))
+        val hint = Hint().also { it.viewHierarchy = attachment }
+
+        sut.captureEvent(SentryEvent(), hint)
+
+        verify(fixture.transport).send(
+            check { envelope ->
+                val viewHierarchy = envelope.items.last()
+                assertNotNull(viewHierarchy) {
+                    assertEquals(attachment.filename, viewHierarchy.header.fileName)
+                }
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `view hierarchy is dropped from hint via before send`() {
+        fixture.sentryOptions.beforeSend = CustomBeforeSendCallback()
+        val sut = fixture.getSut()
+        val attachment = Attachment.fromViewHierarchy(ViewHierarchy("android_view_system", emptyList()))
+        val hint = Hint().also { it.viewHierarchy = attachment }
+
+        sut.captureEvent(SentryEvent(), hint)
+
+        verify(fixture.transport).send(
+            check { envelope ->
+                assertEquals(1, envelope.items.count())
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `thread dump is added to the envelope from the hint`() {
+        val sut = fixture.getSut()
+        val attachment = Attachment.fromThreadDump(byteArrayOf())
+        val hint = Hint().also { it.threadDump = attachment }
+
+        sut.captureEvent(SentryEvent(), hint)
+
+        verify(fixture.transport).send(
+            check { envelope ->
+                val threadDump = envelope.items.last()
+                assertNotNull(threadDump) {
+                    assertEquals(attachment.filename, threadDump.header.fileName)
+                }
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `thread dump is dropped from hint via before send`() {
+        fixture.sentryOptions.beforeSend = CustomBeforeSendCallback()
+        val sut = fixture.getSut()
+        val attachment = Attachment.fromThreadDump(byteArrayOf())
+        val hint = Hint().also { it.threadDump = attachment }
 
         sut.captureEvent(SentryEvent(), hint)
 
@@ -1944,7 +2372,523 @@ class SentryClientTest {
         thenEnvelopeIsSentWith(eventCount = 1, sessionCount = 1, attachmentCount = 0)
     }
 
-    private fun givenScopeWithStartedSession(errored: Boolean = false, crashed: Boolean = false): Scope {
+    @Test
+    fun `TransactionEnds automatically trigger force-stop of any running transaction`() {
+        val sut = fixture.getSut()
+
+        // build up a running transaction
+        val spanContext = SpanContext("op.load")
+        val transaction = mock<ITransaction>()
+        whenever(transaction.name).thenReturn("transaction")
+        whenever(transaction.spanContext).thenReturn(spanContext)
+
+        // scope
+        val scope = mock<IScope>()
+        whenever(scope.transaction).thenReturn(transaction)
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        val scopePropagationContext = PropagationContext()
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        val transactionEnd = object : TransactionEnd {}
+        val transactionEndHint = HintUtils.createWithTypeCheckHint(transactionEnd)
+
+        sut.captureEvent(SentryEvent(), scope, transactionEndHint)
+
+        verify(transaction).forceFinish(SpanStatus.ABORTED, false, null)
+        verify(fixture.transport).send(
+            check {
+                assertEquals(1, it.items.count())
+            },
+            any()
+        )
+    }
+
+    @Test
+    fun `when event has DiskFlushNotification, TransactionEnds set transaction id as flushable`() {
+        val sut = fixture.getSut()
+
+        // build up a running transaction
+        val spanContext = SpanContext("op.load")
+        val transaction = mock<ITransaction>()
+        whenever(transaction.name).thenReturn("transaction")
+        whenever(transaction.eventId).thenReturn(SentryId())
+        whenever(transaction.spanContext).thenReturn(spanContext)
+
+        // scope
+        val scope = mock<Scope>()
+        whenever(scope.transaction).thenReturn(transaction)
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        whenever(scope.replayId).thenReturn(SentryId.EMPTY_ID)
+        val scopePropagationContext = PropagationContext()
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        var capturedEventId: SentryId? = null
+        val transactionEnd = object : TransactionEnd, DiskFlushNotification {
+            override fun markFlushed() {}
+            override fun isFlushable(eventId: SentryId?): Boolean = true
+            override fun setFlushable(eventId: SentryId) {
+                capturedEventId = eventId
+            }
+        }
+        val transactionEndHint = HintUtils.createWithTypeCheckHint(transactionEnd)
+
+        sut.captureEvent(SentryEvent(), scope, transactionEndHint)
+
+        assertEquals(transaction.eventId, capturedEventId)
+        verify(transaction).forceFinish(SpanStatus.ABORTED, false, transactionEndHint)
+        verify(fixture.transport).send(
+            check {
+                assertEquals(1, it.items.count())
+            },
+            any()
+        )
+    }
+
+    @Test
+    fun `attaches trace context from span if none present yet`() {
+        val sut = fixture.getSut()
+
+        // build up a running transaction
+        val spanContext = SpanContext("op.load")
+        val transaction = mock<ITransaction>()
+        whenever(transaction.name).thenReturn("transaction")
+        whenever(transaction.spanContext).thenReturn(spanContext)
+
+        // scope
+        val scope = mock<IScope>()
+        whenever(scope.transaction).thenReturn(transaction)
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        val scopePropagationContext = PropagationContext()
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        whenever(scope.span).thenReturn(transaction)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        val sentryEvent = SentryEvent()
+        sut.captureEvent(sentryEvent, scope)
+
+        verify(fixture.transport).send(
+            check {
+                assertEquals(1, it.items.count())
+            },
+            any()
+        )
+
+        assertEquals(spanContext.traceId, sentryEvent.contexts.trace!!.traceId)
+        assertEquals(spanContext.spanId, sentryEvent.contexts.trace!!.spanId)
+        assertNotEquals(scopePropagationContext.traceId, sentryEvent.contexts.trace!!.traceId)
+        assertNotEquals(scopePropagationContext.spanId, sentryEvent.contexts.trace!!.spanId)
+    }
+
+    @Test
+    fun `attaches trace context from scope if none present yet and no span on scope`() {
+        val sut = fixture.getSut()
+
+        // scope
+        val scope = mock<IScope>()
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        whenever(scope.replayId).thenReturn(SentryId())
+        val scopePropagationContext = PropagationContext()
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        val sentryEvent = SentryEvent()
+        sut.captureEvent(sentryEvent, scope)
+
+        verify(fixture.transport).send(
+            check {
+                assertEquals(1, it.items.count())
+            },
+            any()
+        )
+
+        assertEquals(scopePropagationContext.traceId, sentryEvent.contexts.trace!!.traceId)
+        assertEquals(scopePropagationContext.spanId, sentryEvent.contexts.trace!!.spanId)
+    }
+
+    @Test
+    fun `keeps existing trace context if already present`() {
+        val sut = fixture.getSut()
+
+        // build up a running transaction
+        val spanContext = SpanContext("op.load")
+        val transaction = mock<ITransaction>()
+        whenever(transaction.name).thenReturn("transaction")
+        whenever(transaction.spanContext).thenReturn(spanContext)
+
+        // scope
+        val scope = mock<IScope>()
+        whenever(scope.transaction).thenReturn(transaction)
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        val scopePropagationContext = PropagationContext()
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        val preExistingSpanContext = SpanContext("op.load")
+
+        val sentryEvent = SentryEvent()
+        sentryEvent.contexts.setTrace(preExistingSpanContext)
+        sut.captureEvent(sentryEvent, scope)
+
+        verify(fixture.transport).send(
+            check {
+                assertEquals(1, it.items.count())
+            },
+            any()
+        )
+
+        assertEquals(preExistingSpanContext.traceId, sentryEvent.contexts.trace!!.traceId)
+        assertEquals(preExistingSpanContext.spanId, sentryEvent.contexts.trace!!.spanId)
+        assertNotEquals(spanContext.traceId, sentryEvent.contexts.trace!!.traceId)
+        assertNotEquals(spanContext.spanId, sentryEvent.contexts.trace!!.spanId)
+        assertNotEquals(scopePropagationContext.traceId, sentryEvent.contexts.trace!!.traceId)
+        assertNotEquals(scopePropagationContext.spanId, sentryEvent.contexts.trace!!.spanId)
+    }
+
+    @Test
+    fun `uses propagation context on scope for trace header if no transaction is on scope`() {
+        val sut = fixture.getSut()
+
+        // scope
+        val scope = mock<IScope>()
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        val replayId = SentryId()
+        whenever(scope.replayId).thenReturn(replayId)
+        val scopePropagationContext = PropagationContext()
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        val sentryEvent = SentryEvent()
+        sut.captureEvent(sentryEvent, scope)
+
+        verify(fixture.transport).send(
+            check {
+                assertNotNull(it.header.traceContext)
+                assertEquals(scopePropagationContext.traceId, it.header.traceContext!!.traceId)
+                assertEquals(replayId, it.header.traceContext!!.replayId)
+            },
+            any()
+        )
+    }
+
+    @Test
+    fun `uses trace context on transaction for trace header if a transaction is on scope`() {
+        val sut = fixture.getSut()
+
+        // build up a running transaction
+        val spanContext = SpanContext("op.load")
+        val transaction = mock<ITransaction>()
+        whenever(transaction.name).thenReturn("transaction")
+        whenever(transaction.spanContext).thenReturn(spanContext)
+        val transactionTraceContext = TraceContext(SentryId(), "pubkey")
+        whenever(transaction.traceContext()).thenReturn(transactionTraceContext)
+
+        // scope
+        val scope = mock<IScope>()
+        whenever(scope.transaction).thenReturn(transaction)
+        whenever(scope.breadcrumbs).thenReturn(LinkedList<Breadcrumb>())
+        whenever(scope.extras).thenReturn(emptyMap())
+        whenever(scope.contexts).thenReturn(Contexts())
+        val scopePropagationContext = PropagationContext()
+        whenever(scope.propagationContext).thenReturn(scopePropagationContext)
+        doAnswer { (it.arguments[0] as IWithPropagationContext).accept(scopePropagationContext); scopePropagationContext }.whenever(scope).withPropagationContext(any())
+
+        val preExistingSpanContext = SpanContext("op.load")
+
+        val sentryEvent = SentryEvent()
+        sentryEvent.contexts.setTrace(preExistingSpanContext)
+        sut.captureEvent(sentryEvent, scope)
+
+        verify(fixture.transport).send(
+            check {
+                assertNotNull(it.header.traceContext)
+                assertEquals(transactionTraceContext.traceId, it.header.traceContext!!.traceId)
+            },
+            any()
+        )
+    }
+
+    @Test
+    fun `beforeEnvelopeCallback is executed`() {
+        var beforeEnvelopeCalled = false
+        val sut = fixture.getSut { options ->
+            options.beforeEnvelopeCallback =
+                SentryOptions.BeforeEnvelopeCallback { _, _ -> beforeEnvelopeCalled = true }
+        }
+
+        sut.captureEvent(SentryEvent(), Hint())
+
+        assertTrue(beforeEnvelopeCalled)
+    }
+
+    @Test
+    fun `beforeEnvelopeCallback may fail, but the transport is still sends the envelope `() {
+        val sut = fixture.getSut { options ->
+            options.beforeEnvelopeCallback =
+                SentryOptions.BeforeEnvelopeCallback { _, _ ->
+                    RuntimeException("hook failed")
+                }
+        }
+
+        sut.captureEvent(SentryEvent(), Hint())
+        verify(fixture.transport).send(anyOrNull(), anyOrNull())
+    }
+
+    @Test
+    fun `when captureReplayEvent, envelope is sent`() {
+        val sut = fixture.getSut()
+        val replayEvent = createReplayEvent()
+
+        sut.captureReplayEvent(replayEvent, null, null)
+
+        verify(fixture.transport).send(
+            check { actual ->
+                assertEquals(replayEvent.eventId, actual.header.eventId)
+                assertEquals(fixture.sentryOptions.sdkVersion, actual.header.sdkVersion)
+
+                assertEquals(1, actual.items.count())
+                val item = actual.items.first()
+                assertEquals(SentryItemType.ReplayVideo, item.header.type)
+
+                val unpacker = MessagePack.newDefaultUnpacker(item.data)
+                val mapSize = unpacker.unpackMapHeader()
+                assertEquals(1, mapSize)
+            },
+            any<Hint>()
+        )
+    }
+
+    @Test
+    fun `when captureReplayEvent with recording, adds it to payload`() {
+        val sut = fixture.getSut()
+        val replayEvent = createReplayEvent()
+
+        val hint = Hint().apply { replayRecording = createReplayRecording() }
+        sut.captureReplayEvent(replayEvent, null, hint)
+
+        verify(fixture.transport).send(
+            check { actual ->
+                assertEquals(replayEvent.eventId, actual.header.eventId)
+                assertEquals(fixture.sentryOptions.sdkVersion, actual.header.sdkVersion)
+
+                assertEquals(1, actual.items.count())
+                val item = actual.items.first()
+                assertEquals(SentryItemType.ReplayVideo, item.header.type)
+
+                val unpacker = MessagePack.newDefaultUnpacker(item.data)
+                val mapSize = unpacker.unpackMapHeader()
+                assertEquals(2, mapSize)
+            },
+            any<Hint>()
+        )
+    }
+
+    @Test
+    fun `when captureReplayEvent, omits breadcrumbs and extras from scope`() {
+        val sut = fixture.getSut()
+        val replayEvent = createReplayEvent()
+
+        sut.captureReplayEvent(replayEvent, createScope(), null)
+
+        verify(fixture.transport).send(
+            check { actual ->
+                val item = actual.items.first()
+
+                val unpacker = MessagePack.newDefaultUnpacker(item.data)
+                val mapSize = unpacker.unpackMapHeader()
+                for (i in 0 until mapSize) {
+                    val key = unpacker.unpackString()
+                    when (key) {
+                        SentryItemType.ReplayEvent.itemType -> {
+                            val replayEventLength = unpacker.unpackBinaryHeader()
+                            val replayEventBytes = unpacker.readPayload(replayEventLength)
+                            val actualReplayEvent = fixture.sentryOptions.serializer.deserialize(
+                                InputStreamReader(replayEventBytes.inputStream()),
+                                SentryReplayEvent::class.java
+                            )
+                            // sanity check
+                            assertEquals("id", actualReplayEvent!!.user!!.id)
+
+                            assertNull(actualReplayEvent.breadcrumbs)
+                            assertNull(actualReplayEvent.extras)
+                        }
+                    }
+                }
+            },
+            any<Hint>()
+        )
+    }
+
+    @Test
+    fun `when replay event is dropped, captures client report with datacategory replay`() {
+        fixture.sentryOptions.addEventProcessor(DropEverythingEventProcessor())
+        val sut = fixture.getSut()
+        val replayEvent = createReplayEvent()
+
+        sut.captureReplayEvent(replayEvent, createScope(), null)
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(DiscardedEvent(DiscardReason.EVENT_PROCESSOR.reason, DataCategory.Replay.category, 1))
+        )
+    }
+
+    @Test
+    fun `calls captureReplay on replay controller for error events`() {
+        var called = false
+        fixture.sentryOptions.setReplayController(object : ReplayController by NoOpReplayController.getInstance() {
+            override fun captureReplay(isTerminating: Boolean?) {
+                called = true
+            }
+        })
+        val sut = fixture.getSut()
+
+        sut.captureEvent(SentryEvent().apply { exceptions = listOf(SentryException()) })
+        assertTrue(called)
+    }
+
+    @Test
+    fun `calls captureReplay on replay controller for crash events and sets isTerminating`() {
+        var terminated: Boolean? = false
+        fixture.sentryOptions.setReplayController(object : ReplayController by NoOpReplayController.getInstance() {
+            override fun captureReplay(isTerminating: Boolean?) {
+                terminated = isTerminating
+            }
+        })
+        val sut = fixture.getSut()
+
+        sut.captureEvent(
+            SentryEvent().apply {
+                exceptions = listOf(
+                    SentryException().apply {
+                        mechanism = Mechanism().apply { isHandled = false }
+                    }
+                )
+            }
+        )
+        assertTrue(terminated == true)
+    }
+
+    @Test
+    fun `cleans up replay folder for Backfillable replay events`() {
+        val dir = File(tmpDir.newFolder().absolutePath)
+        val sut = fixture.getSut()
+        val replayEvent = createReplayEvent().apply {
+            videoFile = File(dir, "hello.txt").apply { writeText("hello") }
+        }
+
+        sut.captureReplayEvent(replayEvent, createScope(), HintUtils.createWithTypeCheckHint(BackfillableHint()))
+
+        verify(fixture.transport).send(
+            check { actual ->
+                val item = actual.items.first()
+                item.data
+                assertFalse(dir.exists())
+            },
+            any<Hint>()
+        )
+    }
+
+    @Test
+    fun `does not captureReplay for backfillable events`() {
+        var called = false
+        fixture.sentryOptions.setReplayController(object : ReplayController by NoOpReplayController.getInstance() {
+            override fun captureReplay(isTerminating: Boolean?) {
+                called = true
+            }
+        })
+        val sut = fixture.getSut()
+
+        sut.captureEvent(
+            SentryEvent().apply {
+                exceptions = listOf(
+                    SentryException().apply {
+                        mechanism = Mechanism().apply { isHandled = false }
+                    }
+                )
+            },
+            HintUtils.createWithTypeCheckHint(BackfillableHint())
+        )
+        assertFalse(called)
+    }
+
+    @Test
+    fun `when beforeSendReplay is set, callback is invoked`() {
+        var invoked = false
+        fixture.sentryOptions.setBeforeSendReplay { replay: SentryReplayEvent, _: Hint -> invoked = true; replay }
+
+        fixture.getSut().captureReplayEvent(SentryReplayEvent(), Scope(fixture.sentryOptions), Hint())
+
+        assertTrue(invoked)
+    }
+
+    @Test
+    fun `when beforeSendReplay returns null, event is dropped`() {
+        fixture.sentryOptions.setBeforeSendReplay { replay: SentryReplayEvent, _: Hint -> null }
+
+        fixture.getSut().captureReplayEvent(SentryReplayEvent(), Scope(fixture.sentryOptions), Hint())
+
+        verify(fixture.transport, never()).send(any(), anyOrNull())
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Replay.category, 1)
+            )
+        )
+    }
+
+    @Test
+    fun `when beforeSendReplay returns new instance, new instance is sent`() {
+        val expected = SentryReplayEvent().apply { tags = mapOf("test" to "test") }
+        fixture.sentryOptions.setBeforeSendReplay { _, _ -> expected }
+
+        fixture.getSut().captureReplayEvent(SentryReplayEvent(), Scope(fixture.sentryOptions), Hint())
+
+        verify(fixture.transport).send(
+            check {
+                val replay = getReplayFromData(it.items.first().data)
+                assertEquals("test", replay!!.tags!!["test"])
+            },
+            anyOrNull()
+        )
+        verifyNoMoreInteractions(fixture.transport)
+    }
+
+    @Test
+    fun `when beforeSendReplay throws an exception, replay is dropped`() {
+        val exception = Exception("test")
+
+        exception.stackTrace.toString()
+        fixture.sentryOptions.setBeforeSendReplay { _, _ -> throw exception }
+
+        val id = fixture.getSut().captureReplayEvent(SentryReplayEvent(), Scope(fixture.sentryOptions), Hint())
+
+        assertEquals(SentryId.EMPTY_ID, id)
+
+        assertClientReport(
+            fixture.sentryOptions.clientReportRecorder,
+            listOf(
+                DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.Replay.category, 1)
+            )
+        )
+    }
+
+    private fun givenScopeWithStartedSession(errored: Boolean = false, crashed: Boolean = false): IScope {
         val scope = createScope(fixture.sentryOptions)
         scope.startSession()
 
@@ -1975,19 +2919,19 @@ class SentryClientTest {
         assertEquals(transactionCount, envelopeItemTypes.count { it == SentryItemType.Transaction })
     }
 
-    private fun thenSessionIsStillOK(scope: Scope) {
+    private fun thenSessionIsStillOK(scope: IScope) {
         val sessionAfterCapture = scope.withSession { }!!
         assertEquals(0, sessionAfterCapture.errorCount())
         assertEquals(Session.State.Ok, sessionAfterCapture.status)
     }
 
-    private fun thenSessionIsErrored(scope: Scope) {
+    private fun thenSessionIsErrored(scope: IScope) {
         val sessionAfterCapture = scope.withSession { }!!
         assertTrue(sessionAfterCapture.errorCount() > 0)
         assertEquals(Session.State.Ok, sessionAfterCapture.status)
     }
 
-    private fun thenSessionIsCrashed(scope: Scope) {
+    private fun thenSessionIsCrashed(scope: IScope) {
         val sessionAfterCapture = scope.withSession { }!!
         assertTrue(sessionAfterCapture.errorCount() > 0)
         assertEquals(Session.State.Crashed, sessionAfterCapture.status)
@@ -1996,12 +2940,28 @@ class SentryClientTest {
     class CustomBeforeSendCallback : SentryOptions.BeforeSendCallback {
         override fun execute(event: SentryEvent, hint: Hint): SentryEvent? {
             hint.screenshot = null
-
+            hint.viewHierarchy = null
+            hint.threadDump = null
             return event
         }
     }
 
-    private fun createScope(options: SentryOptions = SentryOptions()): Scope {
+    private fun createReplayEvent(): SentryReplayEvent = SentryReplayEvent().apply {
+        replayId = SentryId("f715e1d64ef64ea3ad7744b5230813c3")
+        segmentId = 0
+        timestamp = DateUtils.getDateTimeWithMillisPrecision("987654321.123")
+        replayStartTimestamp = DateUtils.getDateTimeWithMillisPrecision("987654321.123")
+        urls = listOf("ScreenOne")
+        errorIds = listOf("ab3a347a4cc14fd4b4cf1dc56b670c5b")
+        traceIds = listOf("340cfef948204549ac07c3b353c81c50")
+    }
+
+    private fun createReplayRecording(): ReplayRecording = ReplayRecording().apply {
+        segmentId = 0
+        payload = emptyList()
+    }
+
+    private fun createScope(options: SentryOptions = SentryOptions()): IScope {
         return Scope(options).apply {
             addBreadcrumb(
                 Breadcrumb().apply {
@@ -2021,7 +2981,7 @@ class SentryClientTest {
         }
     }
 
-    private fun createScopeWithAttachments(): Scope {
+    private fun createScopeWithAttachments(): IScope {
         return createScope().apply {
             addAttachment(fixture.attachment)
             addAttachment(fixture.attachment)
@@ -2073,6 +3033,8 @@ class SentryClientTest {
             return userFeedback
         }
 
+    private val checkIn = CheckIn("some_slug", CheckInStatus.OK)
+
     internal class CustomTransportGate : ITransportGate {
         override fun isConnected(): Boolean = false
     }
@@ -2101,6 +3063,25 @@ class SentryClientTest {
             inputStream,
             SentryTransaction::class.java
         )!!
+    }
+
+    private fun getReplayFromData(data: ByteArray): SentryReplayEvent? {
+        val unpacker = MessagePack.newDefaultUnpacker(data)
+        val mapSize = unpacker.unpackMapHeader()
+        for (i in 0 until mapSize) {
+            val key = unpacker.unpackString()
+            when (key) {
+                SentryItemType.ReplayEvent.itemType -> {
+                    val replayEventLength = unpacker.unpackBinaryHeader()
+                    val replayEventBytes = unpacker.readPayload(replayEventLength)
+                    return fixture.sentryOptions.serializer.deserialize(
+                        InputStreamReader(replayEventBytes.inputStream()),
+                        SentryReplayEvent::class.java
+                    )!!
+                }
+            }
+        }
+        return null
     }
 
     private fun verifyAttachmentsInEnvelope(eventId: SentryId?) {
@@ -2151,8 +3132,10 @@ class SentryClientTest {
         )
     }
 
-    internal class DiskFlushNotificationHint : DiskFlushNotification {
-        override fun markFlushed() {}
+    private class AbnormalHint(private val mechanism: String? = null) : AbnormalExit {
+        override fun mechanism(): String? = mechanism
+        override fun ignoreCurrentThread(): Boolean = false
+        override fun timestamp(): Long? = null
     }
 
     private fun eventProcessorThrows(): EventProcessor {
@@ -2161,6 +3144,10 @@ class SentryClientTest {
                 throw Throwable()
             }
         }
+    }
+
+    private class BackfillableHint : Backfillable {
+        override fun shouldEnrich(): Boolean = false
     }
 }
 
@@ -2174,6 +3161,10 @@ class DropEverythingEventProcessor : EventProcessor {
         transaction: SentryTransaction,
         hint: Hint
     ): SentryTransaction? {
+        return null
+    }
+
+    override fun process(event: SentryReplayEvent, hint: Hint): SentryReplayEvent? {
         return null
     }
 }

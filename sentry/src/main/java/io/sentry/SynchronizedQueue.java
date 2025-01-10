@@ -1,4 +1,6 @@
 /*
+ * Adapted from https://github.com/apache/commons-collections/blob/fce46cdcc6fa33ba9472921d4b3ec3f548d8cbcc/src/main/java/org/apache/commons/collections4/queue/SynchronizedQueue.java
+ *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -16,7 +18,9 @@
  */
 package io.sentry;
 
+import io.sentry.util.AutoClosableReentrantLock;
 import java.util.Queue;
+import org.jetbrains.annotations.NotNull;
 
 /**
  * Decorates another {@link Queue} to synchronize its behaviour for a multi-threaded environment.
@@ -63,7 +67,7 @@ final class SynchronizedQueue<E> extends SynchronizedCollection<E> implements Qu
    * @throws NullPointerException if queue or lock is null
    */
   @SuppressWarnings("ProtectedMembersInFinalClass")
-  protected SynchronizedQueue(final Queue<E> queue, final Object lock) {
+  protected SynchronizedQueue(final Queue<E> queue, final AutoClosableReentrantLock lock) {
     super(queue, lock);
   }
 
@@ -79,7 +83,7 @@ final class SynchronizedQueue<E> extends SynchronizedCollection<E> implements Qu
 
   @Override
   public E element() {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().element();
     }
   }
@@ -90,7 +94,7 @@ final class SynchronizedQueue<E> extends SynchronizedCollection<E> implements Qu
     if (object == this) {
       return true;
     }
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().equals(object);
     }
   }
@@ -99,49 +103,49 @@ final class SynchronizedQueue<E> extends SynchronizedCollection<E> implements Qu
 
   @Override
   public int hashCode() {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().hashCode();
     }
   }
 
   @Override
   public boolean offer(final E e) {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().offer(e);
     }
   }
 
   @Override
   public E peek() {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().peek();
     }
   }
 
   @Override
   public E poll() {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().poll();
     }
   }
 
   @Override
   public E remove() {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().remove();
     }
   }
 
   @Override
   public Object[] toArray() {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().toArray();
     }
   }
 
   @Override
   public <T> T[] toArray(T[] object) {
-    synchronized (lock) {
+    try (final @NotNull ISentryLifecycleToken ignored = lock.acquire()) {
       return decorated().toArray(object);
     }
   }

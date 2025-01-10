@@ -1,13 +1,16 @@
 package io.sentry.spring.jakarta
 
 import io.sentry.EventProcessor
-import io.sentry.IHub
+import io.sentry.IScopes
 import io.sentry.ITransportFactory
 import io.sentry.Integration
 import io.sentry.Sentry
 import io.sentry.SentryOptions
+import io.sentry.transport.ITransport
 import org.assertj.core.api.Assertions.assertThat
+import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import org.springframework.boot.context.annotation.UserConfigurations
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
 import org.springframework.context.annotation.Bean
@@ -43,12 +46,12 @@ class EnableSentryTest {
         contextRunner.run {
             assertThat(it).hasSingleBean(SentryOptions::class.java)
             val options = it.getBean(SentryOptions::class.java)
-            assertThat(options.sentryClientName).isEqualTo("sentry.java.spring")
+            assertThat(options.sentryClientName).isEqualTo("sentry.java.spring.jakarta")
             assertThat(options.sdkVersion).isNotNull
-            assertThat(options.sdkVersion!!.name).isEqualTo("sentry.java.spring")
+            assertThat(options.sdkVersion!!.name).isEqualTo("sentry.java.spring.jakarta")
             assertThat(options.sdkVersion!!.version).isEqualTo(BuildConfig.VERSION_NAME)
-            assertThat(options.sdkVersion!!.packages).isNotNull
-            assertThat(options.sdkVersion!!.packages!!.map { pkg -> pkg.name }).contains("maven:io.sentry:sentry-spring")
+            assertThat(options.sdkVersion!!.packageSet.map { pkg -> pkg.name }).contains("maven:io.sentry:sentry-spring-jakarta")
+            assertThat(options.sdkVersion!!.integrationSet).contains("Spring6")
         }
     }
 
@@ -64,7 +67,7 @@ class EnableSentryTest {
     @Test
     fun `creates Sentry Hub`() {
         contextRunner.run {
-            assertThat(it).hasSingleBean(IHub::class.java)
+            assertThat(it).hasSingleBean(IScopes::class.java)
         }
     }
 
@@ -185,7 +188,9 @@ class EnableSentryTest {
     class AppConfigWithCustomTransportFactory {
 
         @Bean
-        fun transport() = mock<ITransportFactory>()
+        fun transport() = mock<ITransportFactory>().also {
+            whenever(it.create(any(), any())).thenReturn(mock<ITransport>())
+        }
     }
 
     @EnableSentry(dsn = "http://key@localhost/proj")

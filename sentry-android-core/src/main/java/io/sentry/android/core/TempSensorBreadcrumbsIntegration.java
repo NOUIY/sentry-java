@@ -2,6 +2,7 @@ package io.sentry.android.core;
 
 import static android.content.Context.SENSOR_SERVICE;
 import static io.sentry.TypeCheckHint.ANDROID_SENSOR_EVENT;
+import static io.sentry.util.IntegrationUtils.addIntegrationToSdkVersion;
 
 import android.content.Context;
 import android.hardware.Sensor;
@@ -10,10 +11,12 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import io.sentry.Breadcrumb;
 import io.sentry.Hint;
-import io.sentry.IHub;
+import io.sentry.IScopes;
+import io.sentry.ISentryLifecycleToken;
 import io.sentry.Integration;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
+import io.sentry.util.AutoClosableReentrantLock;
 import io.sentry.util.Objects;
 import java.io.Closeable;
 import java.io.IOException;
@@ -25,19 +28,21 @@ public final class TempSensorBreadcrumbsIntegration
     implements Integration, Closeable, SensorEventListener {
 
   private final @NotNull Context context;
-  private @Nullable IHub hub;
+  private @Nullable IScopes scopes;
   private @Nullable SentryAndroidOptions options;
 
   @TestOnly @Nullable SensorManager sensorManager;
+  private boolean isClosed = false;
+  private final @NotNull AutoClosableReentrantLock startLock = new AutoClosableReentrantLock();
 
   public TempSensorBreadcrumbsIntegration(final @NotNull Context context) {
-    this.context = Objects.requireNonNull(context, "Context is required");
+    this.context =
+        Objects.requireNonNull(ContextUtils.getApplicationContext(context), "Context is required");
   }
 
-  @SuppressWarnings("deprecation")
   @Override
-  public void register(final @NotNull IHub hub, final @NotNull SentryOptions options) {
-    this.hub = Objects.requireNonNull(hub, "Hub is required");
+  public void register(final @NotNull IScopes scopes, final @NotNull SentryOptions options) {
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required");
     this.options =
         Objects.requireNonNull(
             (options instanceof SentryAndroidOptions) ? (SentryAndroidOptions) options : null,
@@ -51,33 +56,56 @@ public final class TempSensorBreadcrumbsIntegration
             this.options.isEnableSystemEventBreadcrumbs());
 
     if (this.options.isEnableSystemEventBreadcrumbs()) {
-      try {
-        sensorManager = (SensorManager) context.getSystemService(SENSOR_SERVICE);
-        if (sensorManager != null) {
-          final Sensor defaultSensor =
-              sensorManager.getDefaultSensor(Sensor.TYPE_AMBIENT_TEMPERATURE);
-          if (defaultSensor != null) {
-            sensorManager.registerListener(this, defaultSensor, SensorManager.SENSOR_DELAY_NORMAL);
 
-            options
-                .getLogger()
-                .log(SentryLevel.DEBUG, "TempSensorBreadcrumbsIntegration installed.");
-          } else {
-            this.options
-                .getLogger()
-                .log(SentryLevel.INFO, "TYPE_AMBIENT_TEMPERATURE is not available.");
-          }
-        } else {
-          this.options.getLogger().log(SentryLevel.INFO, "SENSOR_SERVICE is not available.");
-        }
+      try {
+        options
+            .getExecutorService()
+            .submit(
+                () -> {
+                  try (final @NotNull ISentryLifecycleToken ignored = startLock.acquire()) {
+                    if (!isClosed) {
+                      startSensorListener(options);
+                    }
+                  }
+                });
       } catch (Throwable e) {
-        options.getLogger().log(SentryLevel.ERROR, e, "Failed to init. the SENSOR_SERVICE.");
+        options
+            .getLogger()
+            .log(
+                SentryLevel.DEBUG,
+                "Failed to start TempSensorBreadcrumbsIntegration on executor thread.",
+                e);
       }
+    }
+  }
+
+  private void startSensorListener(final @NotNull SentryOptions options) {
+    try {
+      sensorManager = (SensorManager) context.getSystemService(SENSOR_SERVICE);
+      if (sensorManager != null) {
+        final Sensor defaultSensor =
+            sensorManager.getDefaultSensor(Sensor.TYPE_AMBIENT_TEMPERATURE);
+        if (defaultSensor != null) {
+          sensorManager.registerListener(this, defaultSensor, SensorManager.SENSOR_DELAY_NORMAL);
+
+          options.getLogger().log(SentryLevel.DEBUG, "TempSensorBreadcrumbsIntegration installed.");
+          addIntegrationToSdkVersion("TempSensorBreadcrumbs");
+        } else {
+          options.getLogger().log(SentryLevel.INFO, "TYPE_AMBIENT_TEMPERATURE is not available.");
+        }
+      } else {
+        options.getLogger().log(SentryLevel.INFO, "SENSOR_SERVICE is not available.");
+      }
+    } catch (Throwable e) {
+      options.getLogger().log(SentryLevel.ERROR, e, "Failed to init. the SENSOR_SERVICE.");
     }
   }
 
   @Override
   public void close() throws IOException {
+    try (final @NotNull ISentryLifecycleToken ignored = startLock.acquire()) {
+      isClosed = true;
+    }
     if (sensorManager != null) {
       sensorManager.unregisterListener(this);
       sensorManager = null;
@@ -96,7 +124,7 @@ public final class TempSensorBreadcrumbsIntegration
       return;
     }
 
-    if (hub != null) {
+    if (scopes != null) {
       final Breadcrumb breadcrumb = new Breadcrumb();
       breadcrumb.setType("system");
       breadcrumb.setCategory("device.event");
@@ -109,7 +137,7 @@ public final class TempSensorBreadcrumbsIntegration
       final Hint hint = new Hint();
       hint.set(ANDROID_SENSOR_EVENT, event);
 
-      hub.addBreadcrumb(breadcrumb, hint);
+      scopes.addBreadcrumb(breadcrumb, hint);
     }
   }
 

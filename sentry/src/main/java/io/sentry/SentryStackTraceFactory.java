@@ -1,25 +1,23 @@
 package io.sentry;
 
 import io.sentry.protocol.SentryStackFrame;
+import io.sentry.util.CollectionUtils;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
-import org.jetbrains.annotations.TestOnly;
 
 /** class responsible for converting Java StackTraceElements to SentryStackFrames */
-final class SentryStackTraceFactory {
+@ApiStatus.Internal
+public final class SentryStackTraceFactory {
 
-  /** list of inApp excludes */
-  private final @Nullable List<String> inAppExcludes;
+  private static final int STACKTRACE_FRAME_LIMIT = 100;
+  private final @NotNull SentryOptions options;
 
-  /** list of inApp includes */
-  private final @Nullable List<String> inAppIncludes;
-
-  public SentryStackTraceFactory(
-      @Nullable final List<String> inAppExcludes, @Nullable List<String> inAppIncludes) {
-    this.inAppExcludes = inAppExcludes;
-    this.inAppIncludes = inAppIncludes;
+  public SentryStackTraceFactory(final @NotNull SentryOptions options) {
+    this.options = options;
   }
 
   /**
@@ -29,7 +27,8 @@ final class SentryStackTraceFactory {
    * @return list of SentryStackFrames or null if none
    */
   @Nullable
-  List<SentryStackFrame> getStackFrames(@Nullable final StackTraceElement[] elements) {
+  public List<SentryStackFrame> getStackFrames(
+      @Nullable final StackTraceElement[] elements, final boolean includeSentryFrames) {
     List<SentryStackFrame> sentryStackFrames = null;
 
     if (elements != null && elements.length > 0) {
@@ -39,9 +38,10 @@ final class SentryStackTraceFactory {
 
           // we don't want to add our own frames
           final String className = item.getClassName();
-          if (className.startsWith("io.sentry.")
-              && !className.startsWith("io.sentry.samples.")
-              && !className.startsWith("io.sentry.mobile.")) {
+          if (!includeSentryFrames
+              && (className.startsWith("io.sentry.")
+                  && !className.startsWith("io.sentry.samples.")
+                  && !className.startsWith("io.sentry.mobile."))) {
             continue;
           }
 
@@ -58,6 +58,11 @@ final class SentryStackTraceFactory {
           }
           sentryStackFrame.setNative(item.isNativeMethod());
           sentryStackFrames.add(sentryStackFrame);
+
+          // hard cap to not exceed payload size limit
+          if (sentryStackFrames.size() >= STACKTRACE_FRAME_LIMIT) {
+            break;
+          }
         }
       }
       Collections.reverse(sentryStackFrames);
@@ -72,26 +77,72 @@ final class SentryStackTraceFactory {
    * @param className the className
    * @return true if it is or false otherwise
    */
-  @TestOnly
-  boolean isInApp(final @Nullable String className) {
+  @Nullable
+  public Boolean isInApp(final @Nullable String className) {
     if (className == null || className.isEmpty()) {
       return true;
     }
 
-    if (inAppIncludes != null) {
-      for (String include : inAppIncludes) {
-        if (className.startsWith(include)) {
-          return true;
-        }
+    final List<String> inAppIncludes = options.getInAppIncludes();
+    for (String include : inAppIncludes) {
+      if (className.startsWith(include)) {
+        return true;
       }
     }
-    if (inAppExcludes != null) {
-      for (String exclude : inAppExcludes) {
-        if (className.startsWith(exclude)) {
-          return false;
-        }
+
+    final List<String> inAppExcludes = options.getInAppExcludes();
+    for (String exclude : inAppExcludes) {
+      if (className.startsWith(exclude)) {
+        return false;
       }
     }
-    return false;
+
+    return null;
+  }
+
+  /**
+   * Returns the call stack leading to the exception, including in-app frames and excluding sentry
+   * and system frames.
+   *
+   * @param exception an exception to get the call stack to
+   * @return a list of sentry stack frames leading to the exception
+   */
+  @NotNull
+  List<SentryStackFrame> getInAppCallStack(final @NotNull Throwable exception) {
+    final StackTraceElement[] stacktrace = exception.getStackTrace();
+    final List<SentryStackFrame> frames = getStackFrames(stacktrace, false);
+    if (frames == null) {
+      return Collections.emptyList();
+    }
+
+    final List<SentryStackFrame> inAppFrames =
+        CollectionUtils.filterListEntries(frames, (frame) -> Boolean.TRUE.equals(frame.isInApp()));
+
+    if (!inAppFrames.isEmpty()) {
+      return inAppFrames;
+    }
+
+    // if inAppFrames is empty, most likely we're operating over an obfuscated app, just trying to
+    // fallback to all the frames that are not system frames
+    return CollectionUtils.filterListEntries(
+        frames,
+        (frame) -> {
+          final String module = frame.getModule();
+          boolean isSystemFrame = false;
+          if (module != null) {
+            isSystemFrame =
+                module.startsWith("sun.")
+                    || module.startsWith("java.")
+                    || module.startsWith("android.")
+                    || module.startsWith("com.android.");
+          }
+          return !isSystemFrame;
+        });
+  }
+
+  @ApiStatus.Internal
+  @NotNull
+  public List<SentryStackFrame> getInAppCallStack() {
+    return getInAppCallStack(new Exception());
   }
 }

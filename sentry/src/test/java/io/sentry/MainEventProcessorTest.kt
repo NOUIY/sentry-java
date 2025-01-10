@@ -1,5 +1,6 @@
 package io.sentry
 
+import io.sentry.hints.AbnormalExit
 import io.sentry.hints.ApplyScopeData
 import io.sentry.protocol.DebugMeta
 import io.sentry.protocol.SdkVersion
@@ -26,13 +27,13 @@ import kotlin.test.assertTrue
 
 class MainEventProcessorTest {
     class Fixture {
-        private val sentryOptions: SentryOptions = SentryOptions().apply {
+        val sentryOptions: SentryOptions = SentryOptions().apply {
             dsn = dsnString
             release = "release"
             dist = "dist"
             sdkVersion = SdkVersion("test", "1.2.3")
         }
-        val hub = mock<IHub>()
+        val scopes = mock<IScopes>()
         val getLocalhost = mock<InetAddress>()
         lateinit var sentryTracer: SentryTracer
         private val hostnameCacheMock = Mockito.mockStatic(HostnameCache::class.java)
@@ -48,6 +49,7 @@ class MainEventProcessorTest {
             resolveHostDelay: Long? = null,
             hostnameCacheDuration: Long = 10,
             proguardUuid: String? = null,
+            bundleIds: List<String>? = null,
             modules: Map<String, String>? = null
         ): MainEventProcessor {
             sentryOptions.isAttachThreads = attachThreads
@@ -62,6 +64,7 @@ class MainEventProcessorTest {
             if (proguardUuid != null) {
                 sentryOptions.proguardUuid = proguardUuid
             }
+            bundleIds?.let { it.forEach { sentryOptions.addBundleId(it) } }
             tags.forEach { sentryOptions.setTag(it.key, it.value) }
             whenever(getLocalhost.canonicalHostName).thenAnswer {
                 if (resolveHostDelay != null) {
@@ -69,8 +72,8 @@ class MainEventProcessorTest {
                 }
                 host
             }
-            whenever(hub.options).thenReturn(sentryOptions)
-            sentryTracer = SentryTracer(TransactionContext("", ""), hub)
+            whenever(scopes.options).thenReturn(sentryOptions)
+            sentryTracer = SentryTracer(TransactionContext("", ""), scopes)
 
             val hostnameCache = HostnameCache(hostnameCacheDuration) { getLocalhost }
             hostnameCacheMock.`when`<Any> { HostnameCache.getInstance() }.thenReturn(hostnameCache)
@@ -251,6 +254,30 @@ class MainEventProcessorTest {
     }
 
     @Test
+    fun `when attach threads is disabled, but the hint is Abnormal, still sets threads`() {
+        val sut = fixture.getSut(attachThreads = false, attachStackTrace = false)
+
+        var event = SentryEvent(RuntimeException("error"))
+        val hint = HintUtils.createWithTypeCheckHint(AbnormalHint())
+        event = sut.process(event, hint)
+
+        assertNotNull(event.threads)
+        assertEquals(1, event.threads!!.count { it.isCrashed == true })
+    }
+
+    @Test
+    fun `when the hint is Abnormal with ignoreCurrentThread, does not mark thread as crashed`() {
+        val sut = fixture.getSut(attachThreads = false, attachStackTrace = false)
+
+        var event = SentryEvent(RuntimeException("error"))
+        val hint = HintUtils.createWithTypeCheckHint(AbnormalHint(ignoreCurrentThread = true))
+        event = sut.process(event, hint)
+
+        assertNotNull(event.threads)
+        assertEquals(0, event.threads!!.count { it.isCrashed == true })
+    }
+
+    @Test
     fun `sets sdkVersion in the event`() {
         val sut = fixture.getSut()
         val event = SentryEvent()
@@ -270,7 +297,7 @@ class MainEventProcessorTest {
     }
 
     @Test
-    fun `when event does not have ip address set and sendDefaultPii is set to true, sets {{auto}} as the ip address`() {
+    fun `when event does not have ip address set, sets {{auto}} as the ip address`() {
         val sut = fixture.getSut(sendDefaultPii = true)
         val event = SentryEvent()
         sut.process(event, Hint())
@@ -280,7 +307,7 @@ class MainEventProcessorTest {
     }
 
     @Test
-    fun `when event has ip address set and sendDefaultPii is set to true, keeps original ip address`() {
+    fun `when event has ip address set, keeps original ip address`() {
         val sut = fixture.getSut(sendDefaultPii = true)
         val event = SentryEvent()
         event.user = User().apply {
@@ -289,17 +316,6 @@ class MainEventProcessorTest {
         sut.process(event, Hint())
         assertNotNull(event.user) {
             assertEquals("192.168.0.1", it.ipAddress)
-        }
-    }
-
-    @Test
-    fun `when event does not have ip address set and sendDefaultPii is set to false, does not set ip address`() {
-        val sut = fixture.getSut(sendDefaultPii = false)
-        val event = SentryEvent()
-        event.user = User()
-        sut.process(event, Hint())
-        assertNotNull(event.user) {
-            assertNull(it.ipAddress)
         }
     }
 
@@ -464,6 +480,23 @@ class MainEventProcessorTest {
     }
 
     @Test
+    fun `when event does not have debug meta and bundle ids are set, attaches debug information`() {
+        val sut = fixture.getSut(bundleIds = listOf("id1", "id2"))
+
+        var event = SentryEvent()
+        event = sut.process(event, Hint())
+
+        assertNotNull(event.debugMeta) {
+            assertNotNull(it.images) { images ->
+                assertEquals("id1", images[0].debugId)
+                assertEquals("jvm", images[0].type)
+                assertEquals("id2", images[1].debugId)
+                assertEquals("jvm", images[1].type)
+            }
+        }
+    }
+
+    @Test
     fun `when event has debug meta and proguard uuids are set, attaches debug information`() {
         val sut = fixture.getSut(proguardUuid = "id1")
 
@@ -480,6 +513,44 @@ class MainEventProcessorTest {
     }
 
     @Test
+    fun `when event has debug meta and bundle ids are set, attaches debug information`() {
+        val sut = fixture.getSut(bundleIds = listOf("id1", "id2"))
+
+        var event = SentryEvent()
+        event.debugMeta = DebugMeta()
+        event = sut.process(event, Hint())
+
+        assertNotNull(event.debugMeta) {
+            assertNotNull(it.images) { images ->
+                assertEquals("id1", images[0].debugId)
+                assertEquals("jvm", images[0].type)
+                assertEquals("id2", images[1].debugId)
+                assertEquals("jvm", images[1].type)
+            }
+        }
+    }
+
+    @Test
+    fun `when event has debug meta as well as images and bundle ids are set, attaches debug information`() {
+        val sut = fixture.getSut(bundleIds = listOf("id1", "id2"))
+
+        var event = SentryEvent()
+        event.debugMeta = DebugMeta().also {
+            it.images = listOf()
+        }
+        event = sut.process(event, Hint())
+
+        assertNotNull(event.debugMeta) {
+            assertNotNull(it.images) { images ->
+                assertEquals("id1", images[0].debugId)
+                assertEquals("jvm", images[0].type)
+                assertEquals("id2", images[1].debugId)
+                assertEquals("jvm", images[1].type)
+            }
+        }
+    }
+
+    @Test
     fun `when processor is closed, closes hostname cache`() {
         val sut = fixture.getSut(serverName = null)
 
@@ -487,7 +558,7 @@ class MainEventProcessorTest {
 
         sut.close()
         assertNotNull(sut.hostnameCache) {
-            assertTrue(it.isClosed())
+            assertTrue(it.isClosed)
         }
     }
 
@@ -516,6 +587,50 @@ class MainEventProcessorTest {
         assertEquals("2.0.0", event.modules!!["group1:artifact1"])
     }
 
+    @Test
+    fun `sets debugMeta for transactions`() {
+        val sut = fixture.getSut(proguardUuid = "id1")
+
+        var transaction = SentryTransaction(fixture.sentryTracer)
+        transaction.debugMeta = DebugMeta()
+        transaction = sut.process(transaction, Hint())
+
+        assertNotNull(transaction.debugMeta) {
+            assertNotNull(it.images) { images ->
+                assertEquals("id1", images[0].uuid)
+                assertEquals("proguard", images[0].type)
+            }
+        }
+    }
+
+    @Test
+    fun `enriches ReplayEvent`() {
+        val sut = fixture.getSut(tags = mapOf("tag1" to "value1"))
+
+        var replayEvent = SentryReplayEvent()
+        replayEvent = sut.process(replayEvent, Hint())
+
+        assertEquals("release", replayEvent.release)
+        assertEquals("environment", replayEvent.environment)
+        assertEquals("dist", replayEvent.dist)
+        assertEquals("1.2.3", replayEvent.sdk!!.version)
+        assertEquals("test", replayEvent.sdk!!.name)
+        assertEquals("java", replayEvent.platform)
+        assertEquals("value1", replayEvent.tags!!["tag1"])
+    }
+
+    @Test
+    fun `uses SdkVersion from replay options for replay events`() {
+        val sut = fixture.getSut(tags = mapOf("tag1" to "value1"))
+
+        fixture.sentryOptions.sessionReplay.sdkVersion = SdkVersion("dart", "3.2.1")
+        var replayEvent = SentryReplayEvent()
+        replayEvent = sut.process(replayEvent, Hint())
+
+        assertEquals("3.2.1", replayEvent.sdk!!.version)
+        assertEquals("dart", replayEvent.sdk!!.name)
+    }
+
     private fun generateCrashedEvent(crashedThread: Thread = Thread.currentThread()) =
         SentryEvent().apply {
             val mockThrowable = mock<Throwable>()
@@ -525,4 +640,12 @@ class MainEventProcessorTest {
             )
             throwable = actualThrowable
         }
+
+    private class AbnormalHint(private val ignoreCurrentThread: Boolean = false) : AbnormalExit {
+        override fun mechanism(): String? = null
+
+        override fun ignoreCurrentThread(): Boolean = ignoreCurrentThread
+
+        override fun timestamp(): Long? = null
+    }
 }

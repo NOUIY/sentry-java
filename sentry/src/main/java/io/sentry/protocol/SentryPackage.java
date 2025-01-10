@@ -2,10 +2,10 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.SentryLevel;
 import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
@@ -46,6 +46,20 @@ public final class SentryPackage implements JsonUnknown, JsonSerializable {
     this.version = Objects.requireNonNull(version, "version is required.");
   }
 
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    SentryPackage that = (SentryPackage) o;
+    return java.util.Objects.equals(name, that.name)
+        && java.util.Objects.equals(version, that.version);
+  }
+
+  @Override
+  public int hashCode() {
+    return java.util.Objects.hash(name, version);
+  }
+
   // JsonKeys
 
   public static final class JsonKeys {
@@ -68,7 +82,7 @@ public final class SentryPackage implements JsonUnknown, JsonSerializable {
   // JsonSerializable
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     writer.name(JsonKeys.NAME).value(name);
@@ -86,8 +100,8 @@ public final class SentryPackage implements JsonUnknown, JsonSerializable {
 
   public static final class Deserializer implements JsonDeserializer<SentryPackage> {
     @Override
-    public @NotNull SentryPackage deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull SentryPackage deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
 
       String name = null;
       String version = null;

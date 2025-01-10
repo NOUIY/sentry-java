@@ -5,30 +5,42 @@ import static io.sentry.android.core.NdkIntegration.SENTRY_NDK_CLASS_NAME;
 import android.app.Application;
 import android.content.Context;
 import android.content.pm.PackageInfo;
-import android.content.res.AssetManager;
-import android.os.Build;
+import io.sentry.DeduplicateMultithreadedEventProcessor;
+import io.sentry.DefaultTransactionPerformanceCollector;
 import io.sentry.ILogger;
+import io.sentry.ISentryLifecycleToken;
+import io.sentry.ITransactionProfiler;
+import io.sentry.NoOpConnectionStatusProvider;
+import io.sentry.ScopeType;
 import io.sentry.SendFireAndForgetEnvelopeSender;
 import io.sentry.SendFireAndForgetOutboxSender;
 import io.sentry.SentryLevel;
+import io.sentry.SentryOpenTelemetryMode;
 import io.sentry.android.core.cache.AndroidEnvelopeCache;
+import io.sentry.android.core.internal.debugmeta.AssetsDebugMetaLoader;
 import io.sentry.android.core.internal.gestures.AndroidViewGestureTargetLocator;
 import io.sentry.android.core.internal.modules.AssetsModulesLoader;
+import io.sentry.android.core.internal.util.AndroidConnectionStatusProvider;
+import io.sentry.android.core.internal.util.AndroidThreadChecker;
 import io.sentry.android.core.internal.util.SentryFrameMetricsCollector;
+import io.sentry.android.core.performance.AppStartMetrics;
 import io.sentry.android.fragment.FragmentLifecycleIntegration;
+import io.sentry.android.replay.DefaultReplayBreadcrumbConverter;
+import io.sentry.android.replay.ReplayIntegration;
 import io.sentry.android.timber.SentryTimberIntegration;
+import io.sentry.cache.PersistingOptionsObserver;
+import io.sentry.cache.PersistingScopeObserver;
 import io.sentry.compose.gestures.ComposeGestureTargetLocator;
+import io.sentry.compose.viewhierarchy.ComposeViewHierarchyExporter;
 import io.sentry.internal.gestures.GestureTargetLocator;
+import io.sentry.internal.viewhierarchy.ViewHierarchyExporter;
+import io.sentry.transport.CurrentDateProvider;
 import io.sentry.transport.NoOpEnvelopeCache;
+import io.sentry.util.LazyEvaluator;
 import io.sentry.util.Objects;
-import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
@@ -39,6 +51,16 @@ import org.jetbrains.annotations.TestOnly;
  */
 @SuppressWarnings("Convert2MethodRef") // older AGP versions do not support method references
 final class AndroidOptionsInitializer {
+
+  static final long DEFAULT_FLUSH_TIMEOUT_MS = 4000;
+
+  static final String SENTRY_COMPOSE_GESTURE_INTEGRATION_CLASS_NAME =
+      "io.sentry.compose.gestures.ComposeGestureTargetLocator";
+
+  static final String SENTRY_COMPOSE_VIEW_HIERARCHY_INTEGRATION_CLASS_NAME =
+      "io.sentry.compose.viewhierarchy.ComposeViewHierarchyExporter";
+
+  static final String COMPOSE_CLASS_NAME = "androidx.compose.ui.node.Owner";
 
   /** private ctor */
   private AndroidOptionsInitializer() {}
@@ -71,10 +93,7 @@ final class AndroidOptionsInitializer {
       final @NotNull BuildInfoProvider buildInfoProvider) {
     Objects.requireNonNull(context, "The context is required.");
 
-    // it returns null if ContextImpl, so let's check for nullability
-    if (context.getApplicationContext() != null) {
-      context = context.getApplicationContext();
-    }
+    context = ContextUtils.getApplicationContext(context);
 
     Objects.requireNonNull(options, "The options object is required.");
     Objects.requireNonNull(logger, "The ILogger object is required.");
@@ -82,104 +101,165 @@ final class AndroidOptionsInitializer {
     // Firstly set the logger, if `debug=true` configured, logging can start asap.
     options.setLogger(logger);
 
+    options.setDefaultScopeType(ScopeType.CURRENT);
+    options.setOpenTelemetryMode(SentryOpenTelemetryMode.OFF);
+    options.setDateProvider(new SentryAndroidDateProvider());
+
+    // set a lower flush timeout on Android to avoid ANRs
+    options.setFlushTimeoutMillis(DEFAULT_FLUSH_TIMEOUT_MS);
+
+    options.setFrameMetricsCollector(
+        new SentryFrameMetricsCollector(context, logger, buildInfoProvider));
+
     ManifestMetadataReader.applyMetadata(context, options, buildInfoProvider);
-    initializeCacheDirs(context, options);
+    options.setCacheDirPath(getCacheDir(context).getAbsolutePath());
 
     readDefaultOptionValues(options, context, buildInfoProvider);
   }
 
   @TestOnly
   static void initializeIntegrationsAndProcessors(
-      final @NotNull SentryAndroidOptions options, final @NotNull Context context) {
+      final @NotNull SentryAndroidOptions options,
+      final @NotNull Context context,
+      final @NotNull io.sentry.util.LoadClass loadClass,
+      final @NotNull ActivityFramesTracker activityFramesTracker) {
     initializeIntegrationsAndProcessors(
         options,
         context,
         new BuildInfoProvider(new AndroidLogger()),
-        new LoadClass(),
-        false,
-        false);
+        loadClass,
+        activityFramesTracker);
   }
 
   static void initializeIntegrationsAndProcessors(
       final @NotNull SentryAndroidOptions options,
       final @NotNull Context context,
       final @NotNull BuildInfoProvider buildInfoProvider,
-      final @NotNull LoadClass loadClass,
-      final boolean isFragmentAvailable,
-      final boolean isTimberAvailable) {
+      final @NotNull io.sentry.util.LoadClass loadClass,
+      final @NotNull ActivityFramesTracker activityFramesTracker) {
 
     if (options.getCacheDirPath() != null
         && options.getEnvelopeDiskCache() instanceof NoOpEnvelopeCache) {
       options.setEnvelopeDiskCache(new AndroidEnvelopeCache(options));
     }
 
-    final ActivityFramesTracker activityFramesTracker =
-        new ActivityFramesTracker(loadClass, options);
+    if (options.getConnectionStatusProvider() instanceof NoOpConnectionStatusProvider) {
+      options.setConnectionStatusProvider(
+          new AndroidConnectionStatusProvider(context, options.getLogger(), buildInfoProvider));
+    }
 
-    installDefaultIntegrations(
-        context,
-        options,
-        buildInfoProvider,
-        loadClass,
-        activityFramesTracker,
-        isFragmentAvailable,
-        isTimberAvailable);
-
+    options.addEventProcessor(new DeduplicateMultithreadedEventProcessor(options));
     options.addEventProcessor(
         new DefaultAndroidEventProcessor(context, buildInfoProvider, options));
     options.addEventProcessor(new PerformanceAndroidEventProcessor(options, activityFramesTracker));
+    options.addEventProcessor(new ScreenshotEventProcessor(options, buildInfoProvider));
+    options.addEventProcessor(new ViewHierarchyEventProcessor(options));
+    options.addEventProcessor(new AnrV2EventProcessor(context, options, buildInfoProvider));
+    options.setTransportGate(new AndroidTransportGate(options));
 
-    options.setTransportGate(new AndroidTransportGate(context, options.getLogger()));
-    final SentryFrameMetricsCollector frameMetricsCollector =
-        new SentryFrameMetricsCollector(context, options, buildInfoProvider);
-    options.setTransactionProfiler(
-        new AndroidTransactionProfiler(context, options, buildInfoProvider, frameMetricsCollector));
+    // Check if the profiler was already instantiated in the app start.
+    // We use the Android profiler, that uses a global start/stop api, so we need to preserve the
+    // state of the profiler, and it's only possible retaining the instance.
+    try (final @NotNull ISentryLifecycleToken ignored = AppStartMetrics.staticLock.acquire()) {
+      final @Nullable ITransactionProfiler appStartProfiler =
+          AppStartMetrics.getInstance().getAppStartProfiler();
+      if (appStartProfiler != null) {
+        options.setTransactionProfiler(appStartProfiler);
+        AppStartMetrics.getInstance().setAppStartProfiler(null);
+      } else {
+        options.setTransactionProfiler(
+            new AndroidTransactionProfiler(
+                context,
+                options,
+                buildInfoProvider,
+                Objects.requireNonNull(
+                    options.getFrameMetricsCollector(),
+                    "options.getFrameMetricsCollector is required")));
+      }
+    }
     options.setModulesLoader(new AssetsModulesLoader(context, options.getLogger()));
+    options.setDebugMetaLoader(new AssetsDebugMetaLoader(context, options.getLogger()));
 
     final boolean isAndroidXScrollViewAvailable =
         loadClass.isClassAvailable("androidx.core.view.ScrollingView", options);
+    final boolean isComposeUpstreamAvailable =
+        loadClass.isClassAvailable(COMPOSE_CLASS_NAME, options);
 
     if (options.getGestureTargetLocators().isEmpty()) {
       final List<GestureTargetLocator> gestureTargetLocators = new ArrayList<>(2);
       gestureTargetLocators.add(new AndroidViewGestureTargetLocator(isAndroidXScrollViewAvailable));
-      try {
-        gestureTargetLocators.add(new ComposeGestureTargetLocator());
-      } catch (NoClassDefFoundError error) {
-        options
-            .getLogger()
-            .log(
-                SentryLevel.DEBUG,
-                "ComposeGestureTargetLocator not available, consider adding the `sentry-compose` library.",
-                error);
+
+      final boolean isComposeAvailable =
+          (isComposeUpstreamAvailable
+              && loadClass.isClassAvailable(
+                  SENTRY_COMPOSE_GESTURE_INTEGRATION_CLASS_NAME, options));
+
+      if (isComposeAvailable) {
+        gestureTargetLocators.add(new ComposeGestureTargetLocator(options.getLogger()));
       }
       options.setGestureTargetLocators(gestureTargetLocators);
     }
+
+    if (options.getViewHierarchyExporters().isEmpty()
+        && isComposeUpstreamAvailable
+        && loadClass.isClassAvailable(
+            SENTRY_COMPOSE_VIEW_HIERARCHY_INTEGRATION_CLASS_NAME, options)) {
+
+      final List<ViewHierarchyExporter> viewHierarchyExporters = new ArrayList<>(1);
+      viewHierarchyExporters.add(new ComposeViewHierarchyExporter(options.getLogger()));
+      options.setViewHierarchyExporters(viewHierarchyExporters);
+    }
+
+    options.setThreadChecker(AndroidThreadChecker.getInstance());
+    if (options.getPerformanceCollectors().isEmpty()) {
+      options.addPerformanceCollector(new AndroidMemoryCollector());
+      options.addPerformanceCollector(new AndroidCpuCollector(options.getLogger()));
+
+      if (options.isEnablePerformanceV2()) {
+        options.addPerformanceCollector(
+            new SpanFrameMetricsCollector(
+                options,
+                Objects.requireNonNull(
+                    options.getFrameMetricsCollector(),
+                    "options.getFrameMetricsCollector is required")));
+      }
+    }
+    options.setTransactionPerformanceCollector(new DefaultTransactionPerformanceCollector(options));
+
+    if (options.getCacheDirPath() != null) {
+      if (options.isEnableScopePersistence()) {
+        options.addScopeObserver(new PersistingScopeObserver(options));
+      }
+      options.addOptionsObserver(new PersistingOptionsObserver(options));
+    }
   }
 
-  private static void installDefaultIntegrations(
+  static void installDefaultIntegrations(
       final @NotNull Context context,
       final @NotNull SentryAndroidOptions options,
       final @NotNull BuildInfoProvider buildInfoProvider,
-      final @NotNull LoadClass loadClass,
+      final @NotNull io.sentry.util.LoadClass loadClass,
       final @NotNull ActivityFramesTracker activityFramesTracker,
       final boolean isFragmentAvailable,
-      final boolean isTimberAvailable) {
+      final boolean isTimberAvailable,
+      final boolean isReplayAvailable) {
+
+    // Integration MUST NOT cache option values in ctor, as they will be configured later by the
+    // user
 
     // read the startup crash marker here to avoid doing double-IO for the SendCachedEnvelope
     // integrations below
-    final boolean hasStartupCrashMarker = AndroidEnvelopeCache.hasStartupCrashMarker(options);
+    LazyEvaluator<Boolean> startupCrashMarkerEvaluator =
+        new LazyEvaluator<>(() -> AndroidEnvelopeCache.hasStartupCrashMarker(options));
 
     options.addIntegration(
         new SendCachedEnvelopeIntegration(
             new SendFireAndForgetEnvelopeSender(() -> options.getCacheDirPath()),
-            hasStartupCrashMarker));
+            startupCrashMarkerEvaluator));
 
     // Integrations are registered in the same order. NDK before adding Watch outbox,
     // because sentry-native move files around and we don't want to watch that.
-    final Class<?> sentryNdkClass =
-        isNdkAvailable(buildInfoProvider)
-            ? loadClass.loadClass(SENTRY_NDK_CLASS_NAME, options.getLogger())
-            : null;
+    final Class<?> sentryNdkClass = loadClass.loadClass(SENTRY_NDK_CLASS_NAME, options.getLogger());
     options.addIntegration(new NdkIntegration(sentryNdkClass));
 
     // this integration uses android.os.FileObserver, we can't move to sentry
@@ -192,22 +272,24 @@ final class AndroidOptionsInitializer {
     options.addIntegration(
         new SendCachedEnvelopeIntegration(
             new SendFireAndForgetOutboxSender(() -> options.getOutboxPath()),
-            hasStartupCrashMarker));
+            startupCrashMarkerEvaluator));
 
-    options.addIntegration(new AnrIntegration(context));
+    // AppLifecycleIntegration has to be installed before AnrIntegration, because AnrIntegration
+    // relies on AppState set by it
     options.addIntegration(new AppLifecycleIntegration());
+    options.addIntegration(AnrIntegrationFactory.create(context, buildInfoProvider));
 
     // registerActivityLifecycleCallbacks is only available if Context is an AppContext
     if (context instanceof Application) {
       options.addIntegration(
           new ActivityLifecycleIntegration(
               (Application) context, buildInfoProvider, activityFramesTracker));
+      options.addIntegration(new ActivityBreadcrumbsIntegration((Application) context));
+      options.addIntegration(new CurrentActivityIntegration((Application) context));
       options.addIntegration(new UserInteractionIntegration((Application) context, loadClass));
       if (isFragmentAvailable) {
         options.addIntegration(new FragmentLifecycleIntegration((Application) context, true, true));
       }
-      options.addEventProcessor(
-          new ScreenshotEventProcessor((Application) context, options, buildInfoProvider));
     } else {
       options
           .getLogger()
@@ -215,13 +297,23 @@ final class AndroidOptionsInitializer {
               SentryLevel.WARNING,
               "ActivityLifecycle, FragmentLifecycle and UserInteraction Integrations need an Application class to be installed.");
     }
+
     if (isTimberAvailable) {
       options.addIntegration(new SentryTimberIntegration());
     }
     options.addIntegration(new AppComponentsBreadcrumbsIntegration(context));
     options.addIntegration(new SystemEventsBreadcrumbsIntegration(context));
+    options.addIntegration(
+        new NetworkBreadcrumbsIntegration(context, buildInfoProvider, options.getLogger()));
     options.addIntegration(new TempSensorBreadcrumbsIntegration(context));
     options.addIntegration(new PhoneStateBreadcrumbsIntegration(context));
+    if (isReplayAvailable) {
+      final ReplayIntegration replay =
+          new ReplayIntegration(context, CurrentDateProvider.getInstance());
+      replay.setBreadcrumbConverter(new DefaultReplayBreadcrumbConverter());
+      options.addIntegration(replay);
+      options.setReplayController(replay);
+    }
   }
 
   /**
@@ -258,35 +350,6 @@ final class AndroidOptionsInitializer {
         options.getLogger().log(SentryLevel.ERROR, "Could not generate distinct Id.", e);
       }
     }
-
-    if (options.getProguardUuid() == null) {
-      options.setProguardUuid(getProguardUUID(context, options.getLogger()));
-    }
-  }
-
-  private static @Nullable String getProguardUUID(
-      final @NotNull Context context, final @NotNull ILogger logger) {
-    final AssetManager assets = context.getAssets();
-    // one may have thousands of asset files and looking up this list might slow down the SDK init.
-    // quite a bit, for this reason, we try to open the file directly and take care of errors
-    // like FileNotFoundException
-    try (final InputStream is =
-        new BufferedInputStream(assets.open("sentry-debug-meta.properties"))) {
-      final Properties properties = new Properties();
-      properties.load(is);
-
-      final String uuid = properties.getProperty("io.sentry.ProguardUuids");
-      logger.log(SentryLevel.DEBUG, "Proguard UUID found: %s", uuid);
-      return uuid;
-    } catch (FileNotFoundException e) {
-      logger.log(SentryLevel.INFO, "sentry-debug-meta.properties file was not found.");
-    } catch (IOException e) {
-      logger.log(SentryLevel.ERROR, "Error getting Proguard UUIDs.", e);
-    } catch (RuntimeException e) {
-      logger.log(SentryLevel.ERROR, "sentry-debug-meta.properties file is malformed.", e);
-    }
-
-    return null;
   }
 
   /**
@@ -303,18 +366,11 @@ final class AndroidOptionsInitializer {
   }
 
   /**
-   * Sets the cache dirs like sentry, outbox and sessions
+   * Retrieve the Sentry cache dir.
    *
    * @param context the Application context
-   * @param options the SentryAndroidOptions
    */
-  private static void initializeCacheDirs(
-      final @NotNull Context context, final @NotNull SentryAndroidOptions options) {
-    final File cacheDir = new File(context.getCacheDir(), "sentry");
-    options.setCacheDirPath(cacheDir.getAbsolutePath());
-  }
-
-  private static boolean isNdkAvailable(final @NotNull BuildInfoProvider buildInfoProvider) {
-    return buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.JELLY_BEAN;
+  static @NotNull File getCacheDir(final @NotNull Context context) {
+    return new File(context.getCacheDir(), "sentry");
   }
 }

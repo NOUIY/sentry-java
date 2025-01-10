@@ -5,10 +5,12 @@ import android.app.Application
 import android.app.Application.ActivityLifecycleCallbacks
 import android.os.Bundle
 import androidx.fragment.app.FragmentActivity
-import io.sentry.IHub
+import io.sentry.IScopes
 import io.sentry.Integration
+import io.sentry.SentryIntegrationPackageStorage
 import io.sentry.SentryLevel.DEBUG
 import io.sentry.SentryOptions
+import io.sentry.util.IntegrationUtils.addIntegrationToSdkVersion
 import java.io.Closeable
 
 class FragmentLifecycleIntegration(
@@ -22,7 +24,7 @@ class FragmentLifecycleIntegration(
 
     constructor(application: Application) : this(
         application = application,
-        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.values().toSet(),
+        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.states,
         enableAutoFragmentLifecycleTracing = false
     )
 
@@ -32,21 +34,24 @@ class FragmentLifecycleIntegration(
         enableAutoFragmentLifecycleTracing: Boolean
     ) : this(
         application = application,
-        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.values().toSet()
+        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.states
             .takeIf { enableFragmentLifecycleBreadcrumbs }
             .orEmpty(),
         enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing
     )
 
-    private lateinit var hub: IHub
+    private lateinit var scopes: IScopes
     private lateinit var options: SentryOptions
 
-    override fun register(hub: IHub, options: SentryOptions) {
-        this.hub = hub
+    override fun register(scopes: IScopes, options: SentryOptions) {
+        this.scopes = scopes
         this.options = options
 
         application.registerActivityLifecycleCallbacks(this)
         options.logger.log(DEBUG, "FragmentLifecycleIntegration installed.")
+        addIntegrationToSdkVersion("FragmentLifecycle")
+        SentryIntegrationPackageStorage.getInstance()
+            .addPackage("maven:io.sentry:sentry-android-fragment", BuildConfig.VERSION_NAME)
     }
 
     override fun close() {
@@ -61,7 +66,7 @@ class FragmentLifecycleIntegration(
             ?.supportFragmentManager
             ?.registerFragmentLifecycleCallbacks(
                 SentryFragmentLifecycleCallbacks(
-                    hub = hub,
+                    scopes = scopes,
                     filterFragmentLifecycleBreadcrumbs = filterFragmentLifecycleBreadcrumbs,
                     enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing
                 ),

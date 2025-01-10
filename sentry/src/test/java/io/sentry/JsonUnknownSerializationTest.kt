@@ -5,6 +5,7 @@ import io.sentry.protocol.Browser
 import io.sentry.protocol.DebugImage
 import io.sentry.protocol.DebugMeta
 import io.sentry.protocol.Device
+import io.sentry.protocol.Geo
 import io.sentry.protocol.Gpu
 import io.sentry.protocol.Mechanism
 import io.sentry.protocol.Message
@@ -50,7 +51,7 @@ class JsonUnknownSerializationTest(
 
     companion object {
         @JvmStatic
-        @Parameterized.Parameters
+        @Parameterized.Parameters(name = "{0}")
         fun data(): Collection<Array<Any>> {
             val app = givenJsonUnknown(App())
             val breadcrumb = givenJsonUnknown(Breadcrumb())
@@ -74,6 +75,7 @@ class JsonUnknownSerializationTest(
             val sentryStackFrame = givenJsonUnknown(SentryStackFrame())
             val sentryStackTrace = givenJsonUnknown(SentryStackTrace())
             val sentryThread = givenJsonUnknown(SentryThread())
+            val sentryLockReason = givenJsonUnknown(SentryLockReason())
             val sentryTransaction = givenJsonUnknown(SentryTransactionSerializationTest.Fixture().getSut())
             val session = givenJsonUnknown(SessionSerializationTest.Fixture().getSut())
             val skdVersion = givenJsonUnknown(SdkVersion("3e934135-3f2b-49bc-8756-9f025b55143e", "3e31738e-4106-42d0-8be2-4a3a1bc648d3"))
@@ -81,6 +83,7 @@ class JsonUnknownSerializationTest(
             val traceContext = givenJsonUnknown(TraceContextSerializationTest.Fixture().getSut())
             val user = givenJsonUnknown(User())
             val userFeedback = givenJsonUnknown(UserFeedback(SentryId("c2fb8fee2e2b49758bcb67cda0f713c7")))
+            val geo = givenJsonUnknown(Geo())
 
             // Same instance for first and second param, so we cann access both JsonUnknown and
             // JsonSerializable in the test method. Third param is the method reference, so we
@@ -108,13 +111,15 @@ class JsonUnknownSerializationTest(
                 arrayOf(sentryStackFrame, sentryStackFrame, SentryStackFrame.Deserializer()::deserialize),
                 arrayOf(sentryStackTrace, sentryStackTrace, SentryStackTrace.Deserializer()::deserialize),
                 arrayOf(sentryThread, sentryThread, SentryThread.Deserializer()::deserialize),
+                arrayOf(sentryLockReason, sentryLockReason, SentryLockReason.Deserializer()::deserialize),
                 arrayOf(sentryTransaction, sentryTransaction, SentryTransaction.Deserializer()::deserialize),
                 arrayOf(session, session, Session.Deserializer()::deserialize),
                 arrayOf(skdVersion, skdVersion, SdkVersion.Deserializer()::deserialize),
                 arrayOf(spanContext, spanContext, SpanContext.Deserializer()::deserialize),
                 arrayOf(traceContext, traceContext, TraceContext.Deserializer()::deserialize),
                 arrayOf(user, user, User.Deserializer()::deserialize),
-                arrayOf(userFeedback, userFeedback, UserFeedback.Deserializer()::deserialize)
+                arrayOf(userFeedback, userFeedback, UserFeedback.Deserializer()::deserialize),
+                arrayOf(geo, geo, Geo.Deserializer()::deserialize)
             )
         }
 

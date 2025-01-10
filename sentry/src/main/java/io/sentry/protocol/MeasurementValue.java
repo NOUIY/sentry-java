@@ -2,10 +2,10 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.SentryLevel;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
@@ -18,6 +18,15 @@ import org.jetbrains.annotations.TestOnly;
 
 @ApiStatus.Internal
 public final class MeasurementValue implements JsonUnknown, JsonSerializable {
+
+  public static final String KEY_APP_START_COLD = "app_start_cold";
+  public static final String KEY_APP_START_WARM = "app_start_warm";
+  public static final String KEY_FRAMES_TOTAL = "frames_total";
+  public static final String KEY_FRAMES_SLOW = "frames_slow";
+  public static final String KEY_FRAMES_FROZEN = "frames_frozen";
+  public static final String KEY_FRAMES_DELAY = "frames_delay";
+  public static final String KEY_TIME_TO_INITIAL_DISPLAY = "time_to_initial_display";
+  public static final String KEY_TIME_TO_FULL_DISPLAY = "time_to_full_display";
 
   @SuppressWarnings("UnusedVariable")
   private final @NotNull Number value;
@@ -70,7 +79,7 @@ public final class MeasurementValue implements JsonUnknown, JsonSerializable {
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     writer.name(JsonKeys.VALUE).value(value);
@@ -93,7 +102,7 @@ public final class MeasurementValue implements JsonUnknown, JsonSerializable {
   public static final class Deserializer implements JsonDeserializer<MeasurementValue> {
     @Override
     public @NotNull MeasurementValue deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       reader.beginObject();
 
       String unit = null;

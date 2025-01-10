@@ -2,11 +2,14 @@ package io.sentry.protocol
 
 import io.sentry.ILogger
 import io.sentry.JsonDeserializer
-import io.sentry.JsonObjectReader
-import io.sentry.JsonObjectWriter
 import io.sentry.JsonSerializable
+import io.sentry.ObjectReader
+import io.sentry.ObjectWriter
 import io.sentry.SentryBaseEvent
+import io.sentry.SentryIntegrationPackageStorage
 import io.sentry.vendor.gson.stream.JsonToken
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 import kotlin.test.assertEquals
@@ -17,14 +20,14 @@ class SentryBaseEventSerializationTest {
      * Make subclass, as `SentryBaseEvent` initializers are protected.
      */
     class Sut : SentryBaseEvent(), JsonSerializable {
-        override fun serialize(writer: JsonObjectWriter, logger: ILogger) {
+        override fun serialize(writer: ObjectWriter, logger: ILogger) {
             writer.beginObject()
             Serializer().serialize(this, writer, logger)
             writer.endObject()
         }
 
         class Deserializer : JsonDeserializer<Sut> {
-            override fun deserialize(reader: JsonObjectReader, logger: ILogger): Sut {
+            override fun deserialize(reader: ObjectReader, logger: ILogger): Sut {
                 val sut = Sut()
                 reader.beginObject()
 
@@ -53,7 +56,7 @@ class SentryBaseEventSerializationTest {
                     setOperatingSystem(OperatingSystemSerializationTest.Fixture().getSut())
                     setRuntime(SentryRuntimeSerializationTest.Fixture().getSut())
                     setResponse(ResponseSerializationTest.Fixture().getSut())
-                    trace = SpanContextSerializationTest.Fixture().getSut()
+                    setTrace(SpanContextSerializationTest.Fixture().getSut())
                 }
                 sdk = SdkVersionSerializationTest.Fixture().getSut()
                 request = RequestSerializationTest.Fixture().getSut()
@@ -69,11 +72,22 @@ class SentryBaseEventSerializationTest {
                 breadcrumbs = listOf(
                     BreadcrumbSerializationTest.Fixture().getSut()
                 )
+                debugMeta = DebugMetaSerializationTest.Fixture().getSut()
                 setExtra("34a7d067-fad2-49d9-97b9-71eff243127b", "fe3dc1cf-4a99-4213-85bb-e0957b8349b8")
             }
         }
     }
     private val fixture = Fixture()
+
+    @Before
+    fun setup() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
+
+    @After
+    fun teardown() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
 
     @Test
     fun serialize() {
@@ -86,9 +100,10 @@ class SentryBaseEventSerializationTest {
 
     @Test
     fun deserialize() {
+        val inputJson = SerializationUtils.sanitizedFile("json/sentry_base_event_with_null_extra.json")
         val expectedJson = SerializationUtils.sanitizedFile("json/sentry_base_event.json")
         val actual = SerializationUtils.deserializeJson(
-            expectedJson,
+            inputJson,
             Sut.Deserializer(),
             fixture.logger
         )

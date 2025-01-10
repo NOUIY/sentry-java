@@ -1,8 +1,10 @@
-.PHONY: all clean compile javadocs dryRelease update stop checkFormat format api assembleBenchmarkTestRelease assembleUiTestRelease
+.PHONY: all clean compile javadocs dryRelease update stop checkFormat format api assembleBenchmarkTestRelease assembleUiTestRelease assembleUiTestCriticalRelease createCoverageReports runUiTestCritical check preMerge publish
 
-all: stop clean javadocs compile
-assembleBenchmarks: stop clean assembleBenchmarkTestRelease
-assembleUiTests: stop clean assembleUiTestRelease
+all: stop clean javadocs compile createCoverageReports
+assembleBenchmarks: assembleBenchmarkTestRelease
+assembleUiTests: assembleUiTestRelease
+preMerge: check createCoverageReports
+publish: clean dryRelease
 
 # deep clean
 clean:
@@ -18,7 +20,7 @@ javadocs:
 
 # do a dry release (like a local deploy)
 dryRelease:
-	./gradlew aggregateJavadocs publishToMavenLocal --no-daemon --no-parallel
+	./gradlew aggregateJavadocs distZip --no-build-cache
 
 # check for dependencies update
 update:
@@ -50,3 +52,22 @@ assembleBenchmarkTestRelease:
 assembleUiTestRelease:
 	./gradlew :sentry-android-integration-tests:sentry-uitest-android:assembleRelease
 	./gradlew :sentry-android-integration-tests:sentry-uitest-android:assembleAndroidTest -DtestBuildType=release
+
+# Assemble release of the uitest-android-critical module
+assembleUiTestCriticalRelease:
+	./gradlew :sentry-android-integration-tests:sentry-uitest-android-critical:assembleRelease
+
+# Run Maestro tests for the uitest-android-critical module
+runUiTestCritical:
+	./scripts/test-ui-critical.sh
+
+# Create coverage reports
+#  - Jacoco for Java & Android modules
+#  - Kover for KMP modules e.g sentry-compose
+createCoverageReports:
+	./gradlew jacocoTestReport
+	./gradlew koverXmlReportRelease
+
+# Run tests and lint
+check:
+	./gradlew check

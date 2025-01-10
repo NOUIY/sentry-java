@@ -1,5 +1,7 @@
 package io.sentry.uitest.android.benchmark
 
+import android.content.Context
+import android.os.Bundle
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.launchActivity
 import androidx.test.espresso.Espresso
@@ -11,8 +13,11 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.runner.AndroidJUnitRunner
 import io.sentry.ITransaction
 import io.sentry.Sentry
+import io.sentry.Sentry.OptionsConfiguration
 import io.sentry.SentryOptions
 import io.sentry.android.core.SentryAndroid
+import io.sentry.android.core.SentryAndroidOptions
+import io.sentry.test.applyTestOptions
 import io.sentry.uitest.android.benchmark.util.BenchmarkOperation
 import org.junit.runner.RunWith
 import kotlin.test.AfterTest
@@ -40,12 +45,14 @@ class SentryBenchmarkTest : BaseBenchmarkTest() {
         val op1 = BenchmarkOperation(choreographer, op = getOperation(runner))
         val op2 = BenchmarkOperation(choreographer, op = getOperation(runner))
         val refreshRate = BenchmarkActivity.refreshRate ?: 60F
-        val comparisonResults = BenchmarkOperation.compare(op1, "Op1", op2, "Op2", refreshRate)
+        // since we benchmark the same operation, warmupIterations = 1 would effectively mean
+        // 2 warmup runs which should be enough
+        val comparisonResults = BenchmarkOperation.compare(op1, "Op1", op2, "Op2", refreshRate, warmupIterations = 1, measuredIterations = 10)
         val comparisonResult = comparisonResults.getSummaryResult()
         comparisonResult.printResults()
 
         // Currently we just want to assert the cpu overhead
-        assertTrue(comparisonResult.cpuTimeIncreasePercentage in -2F..2F)
+        assertTrue(comparisonResult.cpuTimeIncreasePercentage in -2F..2F, "Expected ${comparisonResult.cpuTimeIncreasePercentage} to be in range -2 < x < 2")
         // The fps decrease comparison is skipped, due to approximation: 59.51 and 59.49 fps are considered 60 and 59,
         // respectively. Also, if the average fps is 20 or 60, a difference of 1 fps becomes 5% or 1.66% respectively.
     }
@@ -59,7 +66,7 @@ class SentryBenchmarkTest : BaseBenchmarkTest() {
             choreographer,
             before = {
                 runner.runOnMainSync {
-                    SentryAndroid.init(context) { options: SentryOptions ->
+                    initForTest(context) { options: SentryOptions ->
                         options.dsn = "https://key@uri/1234567"
                         options.tracesSampleRate = 1.0
                         options.profilesSampleRate = 1.0
@@ -89,7 +96,7 @@ class SentryBenchmarkTest : BaseBenchmarkTest() {
         comparisonResult.printResults()
 
         // Currently we just want to assert the cpu overhead
-        assertTrue(comparisonResult.cpuTimeIncreasePercentage in 0F..5.5F)
+        assertTrue(comparisonResult.cpuTimeIncreasePercentage in 0F..5F, "Expected ${comparisonResult.cpuTimeIncreasePercentage} to be in range 0 < x < 5")
     }
 
     /**
@@ -99,7 +106,9 @@ class SentryBenchmarkTest : BaseBenchmarkTest() {
     private fun getOperation(runner: AndroidJUnitRunner, transactionBuilder: () -> ITransaction? = { null }): () -> Unit = {
         var transaction: ITransaction? = null
         // Launch the sentry-uitest-android-benchmark activity
-        val benchmarkScenario = launchActivity<BenchmarkActivity>()
+        val benchmarkScenario = launchActivity<BenchmarkActivity>(
+            activityOptions = Bundle().apply { putBoolean(BenchmarkActivity.EXTRA_SUSTAINED_PERFORMANCE_MODE, true) }
+        )
         // Starts a transaction (it can be null, but we still runOnMainSync to make operations as similar as possible)
         runner.runOnMainSync {
             transaction = transactionBuilder()
@@ -120,5 +129,12 @@ class SentryBenchmarkTest : BaseBenchmarkTest() {
             onView(withId(R.id.benchmark_transaction_list)).perform(swipeUp())
             Espresso.onIdle()
         }
+    }
+}
+
+fun initForTest(context: Context, optionsConfiguration: OptionsConfiguration<SentryAndroidOptions>) {
+    SentryAndroid.init(context) {
+        applyTestOptions(it)
+        optionsConfiguration.configure(it)
     }
 }

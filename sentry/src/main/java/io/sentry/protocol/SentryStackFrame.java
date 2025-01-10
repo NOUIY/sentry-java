@@ -2,10 +2,11 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
+import io.sentry.SentryLockReason;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.List;
@@ -93,6 +94,14 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
    */
   private @Nullable String instructionAddr;
 
+  /**
+   * Potentially mangled name of the symbol as it appears in an executable.
+   *
+   * <p>This is different from a function name by generally being the mangled name that appears
+   * natively in the binary. This is relevant for languages like Swift, C++ or Rust.
+   */
+  private @Nullable String symbol;
+
   @SuppressWarnings("unused")
   private @Nullable Map<String, Object> unknown;
 
@@ -114,6 +123,9 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
    * original value can be stored.
    */
   private @Nullable String rawFunction;
+
+  /** Represents a lock (java monitor object) held by this frame. */
+  private @Nullable SentryLockReason lock;
 
   public @Nullable List<String> getPreContext() {
     return preContext;
@@ -267,6 +279,24 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
     this.rawFunction = rawFunction;
   }
 
+  @Nullable
+  public String getSymbol() {
+    return symbol;
+  }
+
+  public void setSymbol(final @Nullable String symbol) {
+    this.symbol = symbol;
+  }
+
+  @Nullable
+  public SentryLockReason getLock() {
+    return lock;
+  }
+
+  public void setLock(final @Nullable SentryLockReason lock) {
+    this.lock = lock;
+  }
+
   // region json
 
   @Nullable
@@ -296,10 +326,12 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
     public static final String SYMBOL_ADDR = "symbol_addr";
     public static final String INSTRUCTION_ADDR = "instruction_addr";
     public static final String RAW_FUNCTION = "raw_function";
+    public static final String SYMBOL = "symbol";
+    public static final String LOCK = "lock";
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (filename != null) {
@@ -347,6 +379,12 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
     if (rawFunction != null) {
       writer.name(JsonKeys.RAW_FUNCTION).value(rawFunction);
     }
+    if (symbol != null) {
+      writer.name(JsonKeys.SYMBOL).value(symbol);
+    }
+    if (lock != null) {
+      writer.name(JsonKeys.LOCK).value(logger, lock);
+    }
     if (unknown != null) {
       for (String key : unknown.keySet()) {
         Object value = unknown.get(key);
@@ -360,7 +398,7 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
   public static final class Deserializer implements JsonDeserializer<SentryStackFrame> {
     @Override
     public @NotNull SentryStackFrame deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       SentryStackFrame sentryStackFrame = new SentryStackFrame();
       Map<String, Object> unknown = null;
       reader.beginObject();
@@ -411,6 +449,12 @@ public final class SentryStackFrame implements JsonUnknown, JsonSerializable {
             break;
           case JsonKeys.RAW_FUNCTION:
             sentryStackFrame.rawFunction = reader.nextStringOrNull();
+            break;
+          case JsonKeys.SYMBOL:
+            sentryStackFrame.symbol = reader.nextStringOrNull();
+            break;
+          case JsonKeys.LOCK:
+            sentryStackFrame.lock = reader.nextOrNull(logger, new SentryLockReason.Deserializer());
             break;
           default:
             if (unknown == null) {

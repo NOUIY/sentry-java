@@ -5,7 +5,7 @@ import static io.sentry.TypeCheckHint.SPRING_RESOLVER_RESPONSE;
 
 import com.jakewharton.nopen.annotation.Open;
 import io.sentry.Hint;
-import io.sentry.IHub;
+import io.sentry.IScopes;
 import io.sentry.SentryEvent;
 import io.sentry.SentryLevel;
 import io.sentry.exception.ExceptionMechanismException;
@@ -27,17 +27,17 @@ import org.springframework.web.servlet.ModelAndView;
  */
 @Open
 public class SentryExceptionResolver implements HandlerExceptionResolver, Ordered {
-  public static final String MECHANISM_TYPE = "HandlerExceptionResolver";
+  public static final String MECHANISM_TYPE = "Spring5ExceptionResolver";
 
-  private final @NotNull IHub hub;
+  private final @NotNull IScopes scopes;
   private final @NotNull TransactionNameProvider transactionNameProvider;
   private final int order;
 
   public SentryExceptionResolver(
-      final @NotNull IHub hub,
+      final @NotNull IScopes scopes,
       final @NotNull TransactionNameProvider transactionNameProvider,
       final int order) {
-    this.hub = Objects.requireNonNull(hub, "hub is required");
+    this.scopes = Objects.requireNonNull(scopes, "scopes are required");
     this.transactionNameProvider =
         Objects.requireNonNull(transactionNameProvider, "transactionNameProvider is required");
     this.order = order;
@@ -50,6 +50,24 @@ public class SentryExceptionResolver implements HandlerExceptionResolver, Ordere
       final @Nullable Object handler,
       final @NotNull Exception ex) {
 
+    final SentryEvent event = createEvent(request, ex);
+    final Hint hint = createHint(request, response);
+
+    scopes.captureEvent(event, hint);
+
+    // null = run other HandlerExceptionResolvers to actually handle the exception
+    return null;
+  }
+
+  @Override
+  public int getOrder() {
+    return order;
+  }
+
+  @NotNull
+  protected SentryEvent createEvent(
+      final @NotNull HttpServletRequest request, final @NotNull Exception ex) {
+
     final Mechanism mechanism = new Mechanism();
     mechanism.setHandled(false);
     mechanism.setType(MECHANISM_TYPE);
@@ -59,18 +77,17 @@ public class SentryExceptionResolver implements HandlerExceptionResolver, Ordere
     event.setLevel(SentryLevel.FATAL);
     event.setTransaction(transactionNameProvider.provideTransactionName(request));
 
+    return event;
+  }
+
+  @Nullable
+  protected Hint createHint(
+      final @NotNull HttpServletRequest request, final @NotNull HttpServletResponse response) {
+
     final Hint hint = new Hint();
     hint.set(SPRING_RESOLVER_REQUEST, request);
     hint.set(SPRING_RESOLVER_RESPONSE, response);
 
-    hub.captureEvent(event, hint);
-
-    // null = run other HandlerExceptionResolvers to actually handle the exception
-    return null;
-  }
-
-  @Override
-  public int getOrder() {
-    return order;
+    return hint;
   }
 }

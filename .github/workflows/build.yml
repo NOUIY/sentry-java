@@ -3,66 +3,61 @@ on:
   push:
     branches:
       - main
-      - release/**
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Job ${{ matrix.os }} - Java ${{ matrix.java }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # we want that the matrix keeps running, default is to cancel them if it fails.
-      fail-fast: false
-      matrix:
-        # TODO: windows-latest
-        os: [ubuntu-latest, macos-latest]
-        # Zulu Community distribution of OpenJDK
-        java: ['17']
+    name: Build Job ubuntu-latest - Java 17
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Git checkout
-        uses: actions/checkout@v3
-
-      - name: 'Set up Java: ${{ matrix.java }}'
-        uses: actions/setup-java@v3
+      - name: Checkout Repo
+        uses: actions/checkout@v4
         with:
-          java-version: ${{ matrix.java }}
+          submodules: 'recursive'
+
+      - name: Setup Java Version
+        uses: actions/setup-java@v4
+        with:
           distribution: 'temurin'
+          java-version: '17'
 
-      - name: Cache Gradle packages
-        uses: actions/cache@v3
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3839b20885c2c3507be5f0521853826f4b37038a # pin@v3
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          gradle-home-cache-cleanup: true
 
-      # Clean, check formatting, build and do a dry release
-      - name: Make all
-        run: make all
-
-      # We stop gradle at the end to make sure the cache folders
-      # don't contain any lock files and are free to be cached.
-      - name: Make stop
-        run: make stop
-
-      - name: Archive packages
-        # We need artifacts from only one the builds
-        if: runner.os == 'Linux' && matrix.java == '17'
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ github.sha }}
-          if-no-files-found: error
-          path: |
-            ./*/build/distributions/*.zip
-            ./sentry-opentelemetry/*/build/distributions/*.zip
-            ./sentry-android-ndk/build/intermediates/merged_native_libs/release/out/lib/*
+      - name: Run Tests with coverage and Lint
+        run: make preMerge
 
       - name: Upload coverage to Codecov
-        # We need coverage data from only one the builds
-        if: runner.os == 'Linux' && matrix.java == '17'
-        uses: codecov/codecov-action@d9f34f8cd5cb3b3eb79b3e4b5dae3a16df499a70 # pin@v3
+        uses: codecov/codecov-action@7f8b4b4bde536c465e797be725718b88c5d95e0e # pin@v4
         with:
           name: sentry-java
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-build
+          path: |
+            **/build/reports/*
+
+      - name: Test Report
+        uses: phoenix-actions/test-reporting@f957cd93fc2d848d556fa0d03c57bc79127b6b5e # pin@v15
+        if: always()
+        with:
+          name: JUnit Build
+          list-suites: 'failed'
+          list-tests: 'failed'
+          path: |
+            **/build/test-results/**/*.xml
+          reporter: java-junit
+          output-to: step-summary
+          fail-on-error: false

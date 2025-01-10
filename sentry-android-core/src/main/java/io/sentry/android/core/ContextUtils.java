@@ -1,17 +1,65 @@
 package io.sentry.android.core;
 
+import static android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+import static android.content.Context.ACTIVITY_SERVICE;
+import static android.content.Context.RECEIVER_EXPORTED;
+import static android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED;
+
 import android.annotation.SuppressLint;
+import android.app.ActivityManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.provider.Settings;
+import android.util.DisplayMetrics;
 import io.sentry.ILogger;
 import io.sentry.SentryLevel;
+import io.sentry.SentryOptions;
+import io.sentry.protocol.App;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-final class ContextUtils {
+@ApiStatus.Internal
+public final class ContextUtils {
+
+  static class SideLoadedInfo {
+    private final boolean isSideLoaded;
+    private final @Nullable String installerStore;
+
+    public SideLoadedInfo(final boolean isSideLoaded, final @Nullable String installerStore) {
+      this.isSideLoaded = isSideLoaded;
+      this.installerStore = installerStore;
+    }
+
+    public boolean isSideLoaded() {
+      return isSideLoaded;
+    }
+
+    public @Nullable String getInstallerStore() {
+      return installerStore;
+    }
+
+    public @NotNull Map<String, String> asTags() {
+      final Map<String, String> data = new HashMap<>();
+      data.put("isSideLoaded", String.valueOf(isSideLoaded));
+      if (installerStore != null) {
+        data.put("installerStore", installerStore);
+      }
+      return data;
+    }
+  }
 
   private ContextUtils() {}
 
@@ -111,5 +159,235 @@ final class ContextUtils {
   @SuppressWarnings("deprecation")
   private static @NotNull String getVersionCodeDep(final @NotNull PackageInfo packageInfo) {
     return Integer.toString(packageInfo.versionCode);
+  }
+
+  /**
+   * Check if the Started process has IMPORTANCE_FOREGROUND importance which means that the process
+   * will start an Activity.
+   *
+   * @return true if IMPORTANCE_FOREGROUND and false otherwise
+   */
+  @ApiStatus.Internal
+  public static boolean isForegroundImportance() {
+    try {
+      final ActivityManager.RunningAppProcessInfo appProcessInfo =
+          new ActivityManager.RunningAppProcessInfo();
+      ActivityManager.getMyMemoryState(appProcessInfo);
+      return appProcessInfo.importance == IMPORTANCE_FOREGROUND;
+    } catch (Throwable ignored) {
+      // should never happen
+    }
+    return false;
+  }
+
+  /**
+   * Get the device's current kernel version, as a string. Attempts to read /proc/version, and falls
+   * back to the 'os.version' System Property.
+   *
+   * @return the device's current kernel version, as a string
+   */
+  @SuppressWarnings("DefaultCharset")
+  static @Nullable String getKernelVersion(final @NotNull ILogger logger) {
+    // its possible to try to execute 'uname' and parse it or also another unix commands or even
+    // looking for well known root installed apps
+    final String errorMsg = "Exception while attempting to read kernel information";
+    final String defaultVersion = System.getProperty("os.version");
+
+    final File file = new File("/proc/version");
+    if (!file.canRead()) {
+      return defaultVersion;
+    }
+    try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+      return br.readLine();
+    } catch (IOException e) {
+      logger.log(SentryLevel.ERROR, errorMsg, e);
+    }
+
+    return defaultVersion;
+  }
+
+  @SuppressWarnings({"deprecation"})
+  static @Nullable SideLoadedInfo retrieveSideLoadedInfo(
+      final @NotNull Context context,
+      final @NotNull ILogger logger,
+      final @NotNull BuildInfoProvider buildInfoProvider) {
+    String packageName = null;
+    try {
+      final PackageInfo packageInfo = getPackageInfo(context, logger, buildInfoProvider);
+      final PackageManager packageManager = context.getPackageManager();
+
+      if (packageInfo != null && packageManager != null) {
+        packageName = packageInfo.packageName;
+
+        // getInstallSourceInfo requires INSTALL_PACKAGES permission which is only given to system
+        // apps.
+        // if it's installed via adb, system apps or untrusted sources
+        // could be amazon, google play etc - or null in case of sideload
+        final String installerPackageName = packageManager.getInstallerPackageName(packageName);
+        return new SideLoadedInfo(installerPackageName == null, installerPackageName);
+      }
+    } catch (IllegalArgumentException e) {
+      // it'll never be thrown as we are querying its own App's package.
+      logger.log(SentryLevel.DEBUG, "%s package isn't installed.", packageName);
+    }
+
+    return null;
+  }
+
+  /**
+   * Get the human-facing Application name.
+   *
+   * @return Application name
+   */
+  static @Nullable String getApplicationName(
+      final @NotNull Context context, final @NotNull ILogger logger) {
+    try {
+      final ApplicationInfo applicationInfo = context.getApplicationInfo();
+      final int stringId = applicationInfo.labelRes;
+      if (stringId == 0) {
+        if (applicationInfo.nonLocalizedLabel != null) {
+          return applicationInfo.nonLocalizedLabel.toString();
+        }
+        return context.getPackageManager().getApplicationLabel(applicationInfo).toString();
+      } else {
+        return context.getString(stringId);
+      }
+    } catch (Throwable e) {
+      logger.log(SentryLevel.ERROR, "Error getting application name.", e);
+    }
+
+    return null;
+  }
+
+  /**
+   * Get the DisplayMetrics object for the current application.
+   *
+   * @return the DisplayMetrics object for the current application
+   */
+  static @Nullable DisplayMetrics getDisplayMetrics(
+      final @NotNull Context context, final @NotNull ILogger logger) {
+    try {
+      return context.getResources().getDisplayMetrics();
+    } catch (Throwable e) {
+      logger.log(SentryLevel.ERROR, "Error getting DisplayMetrics.", e);
+      return null;
+    }
+  }
+
+  /**
+   * Fake the device family by using the first word in the Build.MODEL. Works well in most cases...
+   * "Nexus 6P" -> "Nexus", "Galaxy S7" -> "Galaxy".
+   *
+   * @return family name of the device, as best we can tell
+   */
+  static @Nullable String getFamily(final @NotNull ILogger logger) {
+    try {
+      return Build.MODEL.split(" ", -1)[0];
+    } catch (Throwable e) {
+      logger.log(SentryLevel.ERROR, "Error getting device family.", e);
+      return null;
+    }
+  }
+
+  static @Nullable String getDeviceName(final @NotNull Context context) {
+    return Settings.Global.getString(context.getContentResolver(), "device_name");
+  }
+
+  static @NotNull String[] getArchitectures() {
+    return Build.SUPPORTED_ABIS;
+  }
+
+  /**
+   * Get MemoryInfo object representing the memory state of the application.
+   *
+   * @return MemoryInfo object representing the memory state of the application
+   */
+  static @Nullable ActivityManager.MemoryInfo getMemInfo(
+      final @NotNull Context context, final @NotNull ILogger logger) {
+    try {
+      final ActivityManager actManager =
+          (ActivityManager) context.getSystemService(ACTIVITY_SERVICE);
+      final ActivityManager.MemoryInfo memInfo = new ActivityManager.MemoryInfo();
+      if (actManager != null) {
+        actManager.getMemoryInfo(memInfo);
+        return memInfo;
+      }
+      logger.log(SentryLevel.INFO, "Error getting MemoryInfo.");
+      return null;
+    } catch (Throwable e) {
+      logger.log(SentryLevel.ERROR, "Error getting MemoryInfo.", e);
+      return null;
+    }
+  }
+
+  /** Register an exported BroadcastReceiver, independently from platform version. */
+  static @Nullable Intent registerReceiver(
+      final @NotNull Context context,
+      final @NotNull SentryOptions options,
+      final @Nullable BroadcastReceiver receiver,
+      final @NotNull IntentFilter filter) {
+    return registerReceiver(context, new BuildInfoProvider(options.getLogger()), receiver, filter);
+  }
+
+  /** Register an exported BroadcastReceiver, independently from platform version. */
+  @SuppressLint({"NewApi", "UnspecifiedRegisterReceiverFlag"})
+  static @Nullable Intent registerReceiver(
+      final @NotNull Context context,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @Nullable BroadcastReceiver receiver,
+      final @NotNull IntentFilter filter) {
+    if (buildInfoProvider.getSdkInfoVersion() >= Build.VERSION_CODES.TIRAMISU) {
+      // From https://developer.android.com/guide/components/broadcasts#context-registered-receivers
+      // If this receiver is listening for broadcasts sent from the system or from other apps, even
+      // other apps that you own—use the RECEIVER_EXPORTED flag. If instead this receiver is
+      // listening only for broadcasts sent by your app, use the RECEIVER_NOT_EXPORTED flag.
+      return context.registerReceiver(receiver, filter, RECEIVER_EXPORTED);
+    } else {
+      return context.registerReceiver(receiver, filter);
+    }
+  }
+
+  static void setAppPackageInfo(
+      final @NotNull PackageInfo packageInfo,
+      final @NotNull BuildInfoProvider buildInfoProvider,
+      final @NotNull App app) {
+    app.setAppIdentifier(packageInfo.packageName);
+    app.setAppVersion(packageInfo.versionName);
+    app.setAppBuild(ContextUtils.getVersionCode(packageInfo, buildInfoProvider));
+
+    final Map<String, String> permissions = new HashMap<>();
+    final String[] requestedPermissions = packageInfo.requestedPermissions;
+    final int[] requestedPermissionsFlags = packageInfo.requestedPermissionsFlags;
+
+    if (requestedPermissions != null
+        && requestedPermissions.length > 0
+        && requestedPermissionsFlags != null
+        && requestedPermissionsFlags.length > 0) {
+      for (int i = 0; i < requestedPermissions.length; i++) {
+        String permission = requestedPermissions[i];
+        permission = permission.substring(permission.lastIndexOf('.') + 1);
+
+        final boolean granted =
+            (requestedPermissionsFlags[i] & REQUESTED_PERMISSION_GRANTED)
+                == REQUESTED_PERMISSION_GRANTED;
+        permissions.put(permission, granted ? "granted" : "not_granted");
+      }
+    }
+    app.setPermissions(permissions);
+  }
+
+  /**
+   * Get the app context
+   *
+   * @return the app context, or if not available, the provided context
+   */
+  @NotNull
+  public static Context getApplicationContext(final @NotNull Context context) {
+    // it returns null if ContextImpl, so let's check for nullability
+    final @Nullable Context appContext = context.getApplicationContext();
+    if (appContext != null) {
+      return appContext;
+    }
+    return context;
   }
 }

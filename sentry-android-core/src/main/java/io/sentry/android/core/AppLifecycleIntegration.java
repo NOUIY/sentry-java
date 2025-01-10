@@ -1,11 +1,13 @@
 package io.sentry.android.core;
 
+import static io.sentry.util.IntegrationUtils.addIntegrationToSdkVersion;
+
 import androidx.lifecycle.ProcessLifecycleOwner;
-import io.sentry.IHub;
+import io.sentry.IScopes;
 import io.sentry.Integration;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
-import io.sentry.android.core.internal.util.MainThreadChecker;
+import io.sentry.android.core.internal.util.AndroidThreadChecker;
 import io.sentry.util.Objects;
 import java.io.Closeable;
 import java.io.IOException;
@@ -15,7 +17,7 @@ import org.jetbrains.annotations.TestOnly;
 
 public final class AppLifecycleIntegration implements Integration, Closeable {
 
-  @TestOnly @Nullable LifecycleWatcher watcher;
+  @TestOnly @Nullable volatile LifecycleWatcher watcher;
 
   private @Nullable SentryAndroidOptions options;
 
@@ -30,8 +32,8 @@ public final class AppLifecycleIntegration implements Integration, Closeable {
   }
 
   @Override
-  public void register(final @NotNull IHub hub, final @NotNull SentryOptions options) {
-    Objects.requireNonNull(hub, "Hub is required");
+  public void register(final @NotNull IScopes scopes, final @NotNull SentryOptions options) {
+    Objects.requireNonNull(scopes, "Scopes are required");
     this.options =
         Objects.requireNonNull(
             (options instanceof SentryAndroidOptions) ? (SentryAndroidOptions) options : null,
@@ -56,12 +58,12 @@ public final class AppLifecycleIntegration implements Integration, Closeable {
       try {
         Class.forName("androidx.lifecycle.DefaultLifecycleObserver");
         Class.forName("androidx.lifecycle.ProcessLifecycleOwner");
-        if (MainThreadChecker.isMainThread()) {
-          addObserver(hub);
+        if (AndroidThreadChecker.getInstance().isMainThread()) {
+          addObserver(scopes);
         } else {
           // some versions of the androidx lifecycle-process require this to be executed on the main
           // thread.
-          handler.post(() -> addObserver(hub));
+          handler.post(() -> addObserver(scopes));
         }
       } catch (ClassNotFoundException e) {
         options
@@ -78,7 +80,7 @@ public final class AppLifecycleIntegration implements Integration, Closeable {
     }
   }
 
-  private void addObserver(final @NotNull IHub hub) {
+  private void addObserver(final @NotNull IScopes scopes) {
     // this should never happen, check added to avoid warnings from NullAway
     if (this.options == null) {
       return;
@@ -86,7 +88,7 @@ public final class AppLifecycleIntegration implements Integration, Closeable {
 
     watcher =
         new LifecycleWatcher(
-            hub,
+            scopes,
             this.options.getSessionTrackingIntervalMillis(),
             this.options.isEnableAutoSessionTracking(),
             this.options.isEnableAppLifecycleBreadcrumbs());
@@ -94,6 +96,7 @@ public final class AppLifecycleIntegration implements Integration, Closeable {
     try {
       ProcessLifecycleOwner.get().getLifecycle().addObserver(watcher);
       options.getLogger().log(SentryLevel.DEBUG, "AppLifecycleIntegration installed.");
+      addIntegrationToSdkVersion("AppLifecycle");
     } catch (Throwable e) {
       // This is to handle a potential 'AbstractMethodError' gracefully. The error is triggered in
       // connection with conflicting dependencies of the androidx.lifecycle.
@@ -109,23 +112,29 @@ public final class AppLifecycleIntegration implements Integration, Closeable {
   }
 
   private void removeObserver() {
-    ProcessLifecycleOwner.get().getLifecycle().removeObserver(watcher);
+    final @Nullable LifecycleWatcher watcherRef = watcher;
+    if (watcherRef != null) {
+      ProcessLifecycleOwner.get().getLifecycle().removeObserver(watcherRef);
+      if (options != null) {
+        options.getLogger().log(SentryLevel.DEBUG, "AppLifecycleIntegration removed.");
+      }
+    }
+    watcher = null;
   }
 
   @Override
   public void close() throws IOException {
-    if (watcher != null) {
-      if (MainThreadChecker.isMainThread()) {
-        removeObserver();
-      } else {
-        // some versions of the androidx lifecycle-process require this to be executed on the main
-        // thread.
-        handler.post(() -> removeObserver());
-      }
-      watcher = null;
-      if (options != null) {
-        options.getLogger().log(SentryLevel.DEBUG, "AppLifecycleIntegration removed.");
-      }
+    if (watcher == null) {
+      return;
+    }
+    if (AndroidThreadChecker.getInstance().isMainThread()) {
+      removeObserver();
+    } else {
+      // some versions of the androidx lifecycle-process require this to be executed on the main
+      // thread.
+      // avoid method refs on Android due to some issues with older AGP setups
+      // noinspection Convert2MethodRef
+      handler.post(() -> removeObserver());
     }
   }
 }

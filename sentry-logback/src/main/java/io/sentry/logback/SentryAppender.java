@@ -12,12 +12,16 @@ import com.jakewharton.nopen.annotation.Open;
 import io.sentry.Breadcrumb;
 import io.sentry.DateUtils;
 import io.sentry.Hint;
-import io.sentry.HubAdapter;
 import io.sentry.ITransportFactory;
+import io.sentry.InitPriority;
+import io.sentry.ScopesAdapter;
 import io.sentry.Sentry;
 import io.sentry.SentryEvent;
+import io.sentry.SentryIntegrationPackageStorage;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
+import io.sentry.exception.ExceptionMechanismException;
+import io.sentry.protocol.Mechanism;
 import io.sentry.protocol.Message;
 import io.sentry.protocol.SdkVersion;
 import io.sentry.util.CollectionUtils;
@@ -36,6 +40,7 @@ import org.jetbrains.annotations.Nullable;
 /** Appender for logback in charge of sending the logged events to a Sentry server. */
 @Open
 public class SentryAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
+  public static final String MECHANISM_TYPE = "LogbackSentryAppender";
   // WARNING: Do not use these options in here, they are only to be used for startup
   private @NotNull SentryOptions options = new SentryOptions();
   private @Nullable ITransportFactory transportFactory;
@@ -45,24 +50,24 @@ public class SentryAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
 
   @Override
   public void start() {
-    // NOTE: logback.xml properties will only be applied if the SDK has not yet been initialized
-    if (!Sentry.isEnabled()) {
-      if (options.getDsn() == null || !options.getDsn().endsWith("_IS_UNDEFINED")) {
-        options.setEnableExternalConfiguration(true);
-        options.setSentryClientName(BuildConfig.SENTRY_LOGBACK_SDK_NAME);
-        options.setSdkVersion(createSdkVersion(options));
-        Optional.ofNullable(transportFactory).ifPresent(options::setTransportFactory);
-        try {
-          Sentry.init(options);
-        } catch (IllegalArgumentException e) {
-          addWarn("Failed to init Sentry during appender initialization: " + e.getMessage());
-        }
-      } else {
-        options
-            .getLogger()
-            .log(SentryLevel.WARNING, "DSN is null. SentryAppender is not being initialized");
+    if (options.getDsn() == null || !options.getDsn().endsWith("_IS_UNDEFINED")) {
+      options.setEnableExternalConfiguration(true);
+      options.setInitPriority(InitPriority.LOWEST);
+      options.setSentryClientName(
+          BuildConfig.SENTRY_LOGBACK_SDK_NAME + "/" + BuildConfig.VERSION_NAME);
+      options.setSdkVersion(createSdkVersion(options));
+      Optional.ofNullable(transportFactory).ifPresent(options::setTransportFactory);
+      try {
+        Sentry.init(options);
+      } catch (IllegalArgumentException e) {
+        addWarn("Failed to init Sentry during appender initialization: " + e.getMessage());
       }
+    } else if (!Sentry.isEnabled()) {
+      options
+          .getLogger()
+          .log(SentryLevel.WARNING, "DSN is null. SentryAppender is not being initialized");
     }
+    addPackageAndIntegrationInfo();
     super.start();
   }
 
@@ -93,16 +98,26 @@ public class SentryAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
   protected @NotNull SentryEvent createEvent(@NotNull ILoggingEvent loggingEvent) {
     final SentryEvent event = new SentryEvent(DateUtils.getDateTime(loggingEvent.getTimeStamp()));
     final Message message = new Message();
-    message.setMessage(loggingEvent.getMessage());
+
+    // if encoder is set we treat message+params as PII as encoders may be used to mask/strip PII
+    if (encoder == null || options.isSendDefaultPii()) {
+      message.setMessage(loggingEvent.getMessage());
+      message.setParams(toParams(loggingEvent.getArgumentArray()));
+    }
+
     message.setFormatted(formatted(loggingEvent));
-    message.setParams(toParams(loggingEvent.getArgumentArray()));
     event.setMessage(message);
     event.setLogger(loggingEvent.getLoggerName());
     event.setLevel(formatLevel(loggingEvent.getLevel()));
 
     final ThrowableProxy throwableInformation = (ThrowableProxy) loggingEvent.getThrowableProxy();
     if (throwableInformation != null) {
-      event.setThrowable(throwableInformation.getThrowable());
+      final Mechanism mechanism = new Mechanism();
+      mechanism.setType(MECHANISM_TYPE);
+      final Throwable mechanismException =
+          new ExceptionMechanismException(
+              mechanism, throwableInformation.getThrowable(), Thread.currentThread());
+      event.setThrowable(mechanismException);
     }
 
     if (loggingEvent.getThreadName() != null) {
@@ -118,9 +133,9 @@ public class SentryAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
         CollectionUtils.filterMapEntries(
             loggingEvent.getMDCPropertyMap(), entry -> entry.getValue() != null);
     if (!mdcProperties.isEmpty()) {
-      // get tags from HubAdapter options to allow getting the correct tags if Sentry has been
+      // get tags from ScopesAdapter options to allow getting the correct tags if Sentry has been
       // initialized somewhere else
-      final List<String> contextTags = HubAdapter.getInstance().getOptions().getContextTags();
+      final List<String> contextTags = ScopesAdapter.getInstance().getOptions().getContextTags();
       if (!contextTags.isEmpty()) {
         for (final String contextTag : contextTags) {
           // if mdc tag is listed in SentryOptions, apply as event tag
@@ -203,9 +218,13 @@ public class SentryAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
     final String version = BuildConfig.VERSION_NAME;
     sdkVersion = SdkVersion.updateSdkVersion(sdkVersion, name, version);
 
-    sdkVersion.addPackage("maven:io.sentry:sentry-logback", version);
-
     return sdkVersion;
+  }
+
+  private void addPackageAndIntegrationInfo() {
+    SentryIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.sentry:sentry-logback", BuildConfig.VERSION_NAME);
+    SentryIntegrationPackageStorage.getInstance().addIntegration("Logback");
   }
 
   public void setOptions(final @Nullable SentryOptions options) {

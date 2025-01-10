@@ -1,4 +1,4 @@
-import io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension
+
 import net.ltgt.gradle.errorprone.errorprone
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import org.springframework.boot.gradle.plugin.SpringBootPlugin
@@ -11,13 +11,6 @@ plugins {
     id(Config.QualityPlugins.gradleVersions)
     id(Config.BuildPlugins.buildConfig) version Config.BuildPlugins.buildConfigVersion
     id(Config.BuildPlugins.springBoot) version Config.springBootVersion apply false
-    id(Config.BuildPlugins.springDependencyManagement) version Config.BuildPlugins.springDependencyManagementVersion
-}
-
-the<DependencyManagementExtension>().apply {
-    imports {
-        mavenBom(SpringBootPlugin.BOM_COORDINATES)
-    }
 }
 
 configure<JavaPluginExtension> {
@@ -32,14 +25,22 @@ tasks.withType<KotlinCompile>().configureEach {
 
 dependencies {
     api(projects.sentry)
+
+    compileOnly(platform(SpringBootPlugin.BOM_COORDINATES))
     compileOnly(Config.Libs.springWeb)
     compileOnly(Config.Libs.springAop)
     compileOnly(Config.Libs.springSecurityWeb)
     compileOnly(Config.Libs.aspectj)
     compileOnly(Config.Libs.servletApi)
     compileOnly(Config.Libs.slf4jApi)
-
     compileOnly(Config.Libs.springWebflux)
+    compileOnly(Config.Libs.springBootStarterGraphql)
+    compileOnly(projects.sentryGraphql)
+    compileOnly(Config.Libs.springBootStarterQuartz)
+    compileOnly(projects.sentryQuartz)
+    compileOnly(Config.Libs.OpenTelemetry.otelSdk)
+    compileOnly(projects.sentryOpentelemetry.sentryOpentelemetryAgentcustomization)
+    compileOnly(projects.sentryOpentelemetry.sentryOpentelemetryBootstrap)
 
     compileOnly(Config.CompileOnly.nopen)
     errorprone(Config.CompileOnly.nopenChecker)
@@ -49,15 +50,19 @@ dependencies {
 
     // tests
     testImplementation(projects.sentryTestSupport)
+    testImplementation(projects.sentryGraphql)
     testImplementation(kotlin(Config.kotlinStdLib))
     testImplementation(Config.TestLibs.kotlinTestJunit)
     testImplementation(Config.TestLibs.mockitoKotlin)
+    testImplementation(Config.TestLibs.mockitoInline)
     testImplementation(Config.Libs.springBootStarterTest)
     testImplementation(Config.Libs.springBootStarterWeb)
     testImplementation(Config.Libs.springBootStarterWebflux)
     testImplementation(Config.Libs.springBootStarterSecurity)
     testImplementation(Config.Libs.springBootStarterAop)
+    testImplementation(Config.Libs.springBootStarterGraphql)
     testImplementation(Config.TestLibs.awaitility)
+    testImplementation(Config.Libs.graphQlJava)
 }
 
 configure<SourceSetContainer> {

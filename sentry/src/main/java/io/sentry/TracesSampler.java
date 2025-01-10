@@ -1,26 +1,31 @@
 package io.sentry;
 
 import io.sentry.util.Objects;
-import java.security.SecureRandom;
+import io.sentry.util.Random;
+import io.sentry.util.SentryRandom;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
 
-final class TracesSampler {
+@ApiStatus.Internal
+public final class TracesSampler {
   private final @NotNull SentryOptions options;
-  private final @NotNull SecureRandom random;
+  private final @Nullable Random random;
 
   public TracesSampler(final @NotNull SentryOptions options) {
-    this(Objects.requireNonNull(options, "options are required"), new SecureRandom());
+    this(Objects.requireNonNull(options, "options are required"), null);
   }
 
   @TestOnly
-  TracesSampler(final @NotNull SentryOptions options, final @NotNull SecureRandom random) {
+  TracesSampler(final @NotNull SentryOptions options, final @Nullable Random random) {
     this.options = options;
     this.random = random;
   }
 
+  @SuppressWarnings("deprecation")
   @NotNull
-  TracesSamplingDecision sample(final @NotNull SamplingContext samplingContext) {
+  public TracesSamplingDecision sample(final @NotNull SamplingContext samplingContext) {
     final TracesSamplingDecision samplingContextSamplingDecision =
         samplingContext.getTransactionContext().getSamplingDecision();
     if (samplingContextSamplingDecision != null) {
@@ -63,11 +68,16 @@ final class TracesSampler {
       return parentSamplingDecision;
     }
 
-    final Double tracesSampleRateFromOptions = options.getTracesSampleRate();
-    if (tracesSampleRateFromOptions != null) {
+    final @Nullable Double tracesSampleRateFromOptions = options.getTracesSampleRate();
+    final @NotNull Double downsampleFactor =
+        Math.pow(2, options.getBackpressureMonitor().getDownsampleFactor());
+    final @Nullable Double downsampledTracesSampleRate =
+        tracesSampleRateFromOptions == null ? null : tracesSampleRateFromOptions / downsampleFactor;
+
+    if (downsampledTracesSampleRate != null) {
       return new TracesSamplingDecision(
-          sample(tracesSampleRateFromOptions),
-          tracesSampleRateFromOptions,
+          sample(downsampledTracesSampleRate),
+          downsampledTracesSampleRate,
           profilesSampled,
           profilesSampleRate);
     }
@@ -76,6 +86,13 @@ final class TracesSampler {
   }
 
   private boolean sample(final @NotNull Double aDouble) {
-    return !(aDouble < random.nextDouble());
+    return !(aDouble < getRandom().nextDouble());
+  }
+
+  private Random getRandom() {
+    if (random == null) {
+      return SentryRandom.current();
+    }
+    return random;
   }
 }

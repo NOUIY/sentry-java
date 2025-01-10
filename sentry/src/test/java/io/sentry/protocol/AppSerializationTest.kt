@@ -29,6 +29,9 @@ class AppSerializationTest {
                 "WRITE_EXTERNAL_STORAGE" to "not_granted",
                 "CAMERA" to "granted"
             )
+            inForeground = true
+            viewNames = listOf("MainActivity", "SidebarActivity")
+            startType = "cold"
         }
     }
     private val fixture = Fixture()

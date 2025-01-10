@@ -2,8 +2,10 @@ package io.sentry.transport.apache;
 
 import static io.sentry.SentryLevel.*;
 
+import io.sentry.DateUtils;
 import io.sentry.Hint;
 import io.sentry.RequestDetails;
+import io.sentry.SentryDate;
 import io.sentry.SentryEnvelope;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
@@ -76,6 +78,12 @@ public final class ApacheHttpClientTransport implements ITransport {
             options.getClientReportRecorder().attachReportToEnvelope(filteredEnvelope);
 
         if (envelopeWithClientReport != null) {
+
+          @NotNull SentryDate now = options.getDateProvider().now();
+          envelopeWithClientReport
+              .getHeader()
+              .setSentAt(DateUtils.nanosToDate(now.nanoTimestamp()));
+
           currentlyRunning.increment();
 
           try (final ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
@@ -182,14 +190,25 @@ public final class ApacheHttpClientTransport implements ITransport {
   }
 
   @Override
+  public @NotNull RateLimiter getRateLimiter() {
+    return rateLimiter;
+  }
+
+  @Override
   public void close() throws IOException {
+    close(false);
+  }
+
+  @Override
+  public void close(final boolean isRestarting) throws IOException {
     options.getLogger().log(DEBUG, "Shutting down");
     try {
-      httpclient.awaitShutdown(TimeValue.ofSeconds(1));
-      httpclient.close(CloseMode.GRACEFUL);
+      httpclient.awaitShutdown(TimeValue.ofSeconds(isRestarting ? 0 : 1));
     } catch (InterruptedException e) {
       options.getLogger().log(DEBUG, "Thread interrupted while closing the connection.");
       Thread.currentThread().interrupt();
+    } finally {
+      httpclient.close(CloseMode.GRACEFUL);
     }
   }
 

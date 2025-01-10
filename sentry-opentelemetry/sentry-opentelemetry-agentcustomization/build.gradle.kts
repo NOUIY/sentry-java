@@ -20,7 +20,11 @@ tasks.withType<KotlinCompile>().configureEach {
 
 dependencies {
     compileOnly(projects.sentry)
-    implementation(projects.sentryOpentelemetry.sentryOpentelemetryCore)
+    implementation(projects.sentryOpentelemetry.sentryOpentelemetryCore) {
+        exclude(group = "io.opentelemetry")
+        exclude(group = "io.opentelemetry.javaagent")
+    }
+    compileOnly(projects.sentryOpentelemetry.sentryOpentelemetryBootstrap)
 
     compileOnly(Config.Libs.OpenTelemetry.otelSdk)
     compileOnly(Config.Libs.OpenTelemetry.otelExtensionAutoconfigureSpi)
@@ -53,8 +57,8 @@ jacoco {
 
 tasks.jacocoTestReport {
     reports {
-        xml.isEnabled = true
-        html.isEnabled = false
+        xml.required.set(true)
+        html.required.set(false)
     }
 }
 

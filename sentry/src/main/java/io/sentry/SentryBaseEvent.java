@@ -2,6 +2,7 @@ package io.sentry;
 
 import io.sentry.exception.ExceptionMechanismException;
 import io.sentry.protocol.Contexts;
+import io.sentry.protocol.DebugMeta;
 import io.sentry.protocol.Request;
 import io.sentry.protocol.SdkVersion;
 import io.sentry.protocol.SentryId;
@@ -106,6 +107,9 @@ public abstract class SentryBaseEvent {
   /** List of breadcrumbs recorded before this event. */
   private @Nullable List<Breadcrumb> breadcrumbs;
 
+  /** Meta data for event processing and debugging. */
+  private @Nullable DebugMeta debugMeta;
+
   /**
    * Arbitrary extra information set by the user.
    *
@@ -170,8 +174,9 @@ public abstract class SentryBaseEvent {
    *
    * @return the Throwable or null
    */
+  @ApiStatus.Internal
   @Nullable
-  Throwable getThrowableMechanism() {
+  public Throwable getThrowableMechanism() {
     return throwable;
   }
 
@@ -276,8 +281,16 @@ public abstract class SentryBaseEvent {
     breadcrumbs.add(breadcrumb);
   }
 
+  public @Nullable DebugMeta getDebugMeta() {
+    return debugMeta;
+  }
+
+  public void setDebugMeta(final @Nullable DebugMeta debugMeta) {
+    this.debugMeta = debugMeta;
+  }
+
   @Nullable
-  Map<String, Object> getExtras() {
+  public Map<String, Object> getExtras() {
     return extra;
   }
 
@@ -324,14 +337,15 @@ public abstract class SentryBaseEvent {
     public static final String SERVER_NAME = "server_name";
     public static final String DIST = "dist";
     public static final String BREADCRUMBS = "breadcrumbs";
+
+    public static final String DEBUG_META = "debug_meta";
+
     public static final String EXTRA = "extra";
   }
 
   public static final class Serializer {
     public void serialize(
-        @NotNull SentryBaseEvent baseEvent,
-        @NotNull JsonObjectWriter writer,
-        @NotNull ILogger logger)
+        @NotNull SentryBaseEvent baseEvent, @NotNull ObjectWriter writer, @NotNull ILogger logger)
         throws IOException {
       if (baseEvent.eventId != null) {
         writer.name(JsonKeys.EVENT_ID).value(logger, baseEvent.eventId);
@@ -367,6 +381,9 @@ public abstract class SentryBaseEvent {
       if (baseEvent.breadcrumbs != null && !baseEvent.breadcrumbs.isEmpty()) {
         writer.name(JsonKeys.BREADCRUMBS).value(logger, baseEvent.breadcrumbs);
       }
+      if (baseEvent.debugMeta != null) {
+        writer.name(JsonKeys.DEBUG_META).value(logger, baseEvent.debugMeta);
+      }
       if (baseEvent.extra != null && !baseEvent.extra.isEmpty()) {
         writer.name(JsonKeys.EXTRA).value(logger, baseEvent.extra);
       }
@@ -378,7 +395,7 @@ public abstract class SentryBaseEvent {
     public boolean deserializeValue(
         @NotNull SentryBaseEvent baseEvent,
         @NotNull String nextName,
-        @NotNull JsonObjectReader reader,
+        @NotNull ObjectReader reader,
         @NotNull ILogger logger)
         throws Exception {
       switch (nextName) {
@@ -418,7 +435,10 @@ public abstract class SentryBaseEvent {
           baseEvent.dist = reader.nextStringOrNull();
           return true;
         case JsonKeys.BREADCRUMBS:
-          baseEvent.breadcrumbs = reader.nextList(logger, new Breadcrumb.Deserializer());
+          baseEvent.breadcrumbs = reader.nextListOrNull(logger, new Breadcrumb.Deserializer());
+          return true;
+        case JsonKeys.DEBUG_META:
+          baseEvent.debugMeta = reader.nextOrNull(logger, new DebugMeta.Deserializer());
           return true;
         case JsonKeys.EXTRA:
           Map<String, Object> deserializedExtra = (Map<String, Object>) reader.nextObjectOrNull();

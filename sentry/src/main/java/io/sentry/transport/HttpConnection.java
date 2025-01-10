@@ -18,7 +18,6 @@ import java.net.Proxy;
 import java.nio.charset.Charset;
 import java.util.Map;
 import java.util.zip.GZIPOutputStream;
-import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
 import org.jetbrains.annotations.NotNull;
@@ -79,8 +78,14 @@ final class HttpConnection {
       final String host = optionsProxy.getHost();
       if (port != null && host != null) {
         try {
+          final @NotNull Proxy.Type type;
+          if (optionsProxy.getType() != null) {
+            type = optionsProxy.getType();
+          } else {
+            type = Proxy.Type.HTTP;
+          }
           InetSocketAddress proxyAddr = new InetSocketAddress(host, Integer.parseInt(port));
-          proxy = new Proxy(Proxy.Type.HTTP, proxyAddr);
+          proxy = new Proxy(type, proxyAddr);
         } catch (NumberFormatException e) {
           options
               .getLogger()
@@ -130,12 +135,6 @@ final class HttpConnection {
     connection.setConnectTimeout(options.getConnectionTimeoutMillis());
     connection.setReadTimeout(options.getReadTimeoutMillis());
 
-    final HostnameVerifier hostnameVerifier = options.getHostnameVerifier();
-
-    if (connection instanceof HttpsURLConnection && hostnameVerifier != null) {
-      ((HttpsURLConnection) connection).setHostnameVerifier(hostnameVerifier);
-    }
-
     final SSLSocketFactory sslSocketFactory = options.getSslSocketFactory();
 
     if (connection instanceof HttpsURLConnection && sslSocketFactory != null) {
@@ -182,8 +181,10 @@ final class HttpConnection {
         options.getLogger().log(ERROR, "Request failed, API returned %s", responseCode);
         // double check because call is expensive
         if (options.isDebug()) {
-          String errorMessage = getErrorMessageFromStream(connection);
-          options.getLogger().log(ERROR, errorMessage);
+          final @NotNull String errorMessage = getErrorMessageFromStream(connection);
+          // the error message may contain anything (including formatting symbols), so provide it as
+          // an argument itself
+          options.getLogger().log(ERROR, "%s", errorMessage);
         }
 
         return TransportResult.error(responseCode);

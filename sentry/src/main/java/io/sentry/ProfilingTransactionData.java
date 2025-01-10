@@ -1,9 +1,9 @@
 package io.sentry;
 
+import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
@@ -29,7 +29,7 @@ public final class ProfilingTransactionData implements JsonUnknown, JsonSerializ
       @NotNull ITransaction transaction, @NotNull Long startNs, @NotNull Long startCpuMs) {
     this.id = transaction.getEventId().toString();
     this.traceId = transaction.getSpanContext().getTraceId().toString();
-    this.name = transaction.getName();
+    this.name = transaction.getName().isEmpty() ? "unknown" : transaction.getName();
     this.relativeStartNs = startNs;
     this.relativeStartCpuMs = startCpuMs;
   }
@@ -144,7 +144,7 @@ public final class ProfilingTransactionData implements JsonUnknown, JsonSerializ
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     writer.name(JsonKeys.ID).value(logger, id);
@@ -179,7 +179,7 @@ public final class ProfilingTransactionData implements JsonUnknown, JsonSerializ
 
     @Override
     public @NotNull ProfilingTransactionData deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       reader.beginObject();
       ProfilingTransactionData data = new ProfilingTransactionData();
       Map<String, Object> unknown = null;

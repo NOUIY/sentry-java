@@ -10,12 +10,19 @@ android {
 
     defaultConfig {
         targetSdk = Config.Android.targetSdkVersion
-        minSdk = Config.Android.minSdkVersionNdk
+        minSdk = Config.Android.minSdkVersion
     }
 
     buildFeatures {
         // Determines whether to generate a BuildConfig class.
         buildConfig = false
+    }
+
+    buildTypes {
+        getByName("debug")
+        getByName("release") {
+            consumerProguardFiles("proguard-rules.pro")
+        }
     }
 
     variantFilter {
@@ -28,4 +35,5 @@ android {
 dependencies {
     api(projects.sentryAndroidCore)
     api(projects.sentryAndroidNdk)
+    api(projects.sentryAndroidReplay)
 }

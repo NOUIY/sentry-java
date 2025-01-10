@@ -1,6 +1,6 @@
 package io.sentry;
 
-import java.util.Date;
+import io.sentry.protocol.Contexts;
 import java.util.List;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
@@ -20,10 +20,28 @@ public interface ISpan {
   @ApiStatus.Internal
   @NotNull
   ISpan startChild(
+      @NotNull String operation, @Nullable String description, @NotNull SpanOptions spanOptions);
+
+  @ApiStatus.Internal
+  @NotNull
+  ISpan startChild(@NotNull SpanContext spanContext, @NotNull SpanOptions spanOptions);
+
+  @ApiStatus.Internal
+  @NotNull
+  ISpan startChild(
       @NotNull String operation,
       @Nullable String description,
-      @Nullable Date timestamp,
+      @Nullable SentryDate timestamp,
       @NotNull Instrumenter instrumenter);
+
+  @ApiStatus.Internal
+  @NotNull
+  ISpan startChild(
+      @NotNull String operation,
+      @Nullable String description,
+      @Nullable SentryDate timestamp,
+      @NotNull Instrumenter instrumenter,
+      @NotNull SpanOptions spanOptions);
 
   /**
    * Starts a child Span.
@@ -77,8 +95,7 @@ public interface ISpan {
    * @param status - the status
    * @param timestamp - the end timestamp
    */
-  @ApiStatus.Internal
-  void finish(@Nullable SpanStatus status, @Nullable Date timestamp);
+  void finish(@Nullable SpanStatus status, @Nullable SentryDate timestamp);
 
   /**
    * Sets span operation.
@@ -208,10 +225,53 @@ public interface ISpan {
   void setMeasurement(@NotNull String name, @NotNull Number value, @NotNull MeasurementUnit unit);
 
   /**
+   * Updates the end date of the span. Note: This will only update the end date if the span is
+   * already finished.
+   *
+   * @param date the end date to set
+   * @return true if the end date was updated, false otherwise
+   */
+  @ApiStatus.Internal
+  boolean updateEndDate(@NotNull SentryDate date);
+
+  /**
+   * Returns the start date of this span or transaction.
+   *
+   * @return the start date
+   */
+  @ApiStatus.Internal
+  @NotNull
+  SentryDate getStartDate();
+
+  /**
+   * Returns the end date of this span or transaction.
+   *
+   * @return the end date
+   */
+  @ApiStatus.Internal
+  @Nullable
+  SentryDate getFinishDate();
+
+  /**
    * Whether this span instance is a NOOP that doesn't collect information
    *
    * @return true if NOOP
    */
   @ApiStatus.Internal
   boolean isNoOp();
+
+  void setContext(@NotNull String key, @NotNull Object context);
+
+  @NotNull
+  Contexts getContexts();
+
+  @Nullable
+  Boolean isSampled();
+
+  @Nullable
+  TracesSamplingDecision getSamplingDecision();
+
+  @ApiStatus.Internal
+  @NotNull
+  ISentryLifecycleToken makeCurrent();
 }

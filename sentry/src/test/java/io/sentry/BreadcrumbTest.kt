@@ -1,10 +1,12 @@
 package io.sentry
 
+import java.util.Date
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
+import kotlin.test.assertNull
 
 class BreadcrumbTest {
 
@@ -20,6 +22,7 @@ class BreadcrumbTest {
         val level = SentryLevel.DEBUG
         breadcrumb.level = level
         breadcrumb.category = "category"
+        breadcrumb.origin = "origin"
 
         val clone = Breadcrumb(breadcrumb)
 
@@ -43,6 +46,7 @@ class BreadcrumbTest {
         val level = SentryLevel.DEBUG
         breadcrumb.level = level
         breadcrumb.category = "category"
+        breadcrumb.origin = "origin"
 
         val clone = Breadcrumb(breadcrumb)
 
@@ -52,6 +56,7 @@ class BreadcrumbTest {
         assertEquals("type", clone.type)
         assertEquals(SentryLevel.DEBUG, clone.level)
         assertEquals("category", clone.category)
+        assertEquals("origin", clone.origin)
     }
 
     @Test
@@ -66,6 +71,7 @@ class BreadcrumbTest {
         val level = SentryLevel.DEBUG
         breadcrumb.level = level
         breadcrumb.category = "category"
+        breadcrumb.origin = "origin"
 
         val clone = Breadcrumb(breadcrumb)
 
@@ -76,6 +82,7 @@ class BreadcrumbTest {
         breadcrumb.type = "newType"
         breadcrumb.level = SentryLevel.FATAL
         breadcrumb.category = "newCategory"
+        breadcrumb.origin = "newOrigin"
 
         assertEquals("message", clone.message)
         assertEquals("data", clone.data["data"])
@@ -85,12 +92,19 @@ class BreadcrumbTest {
         assertEquals("type", clone.type)
         assertEquals(SentryLevel.DEBUG, clone.level)
         assertEquals("category", clone.category)
+        assertEquals("origin", clone.origin)
     }
 
     @Test
     fun `breadcrumb has timestamp when created`() {
         val breadcrumb = Breadcrumb()
         assertNotNull(breadcrumb.timestamp)
+    }
+
+    @Test
+    fun `breadcrumb can be created with Date timestamp`() {
+        val breadcrumb = Breadcrumb(Date(123L))
+        assertEquals(123L, breadcrumb.timestamp.time)
     }
 
     @Test
@@ -101,8 +115,10 @@ class BreadcrumbTest {
 
     @Test
     fun `creates HTTP breadcrumb`() {
-        val breadcrumb = Breadcrumb.http("http://example.com", "POST")
-        assertEquals("http://example.com", breadcrumb.data["url"])
+        val breadcrumb = Breadcrumb.http("http://example.com/api?q=1#top", "POST")
+        assertEquals("http://example.com/api", breadcrumb.data["url"])
+        assertEquals("q=1", breadcrumb.data["http.query"])
+        assertEquals("top", breadcrumb.data["http.fragment"])
         assertEquals("POST", breadcrumb.data["method"])
         assertEquals("http", breadcrumb.type)
         assertEquals("http", breadcrumb.category)
@@ -126,6 +142,38 @@ class BreadcrumbTest {
         assertEquals("http", breadcrumb.type)
         assertEquals("http", breadcrumb.category)
         assertFalse(breadcrumb.data.containsKey("status_code"))
+    }
+
+    @Test
+    fun `creates HTTP breadcrumb with WARNING level if status code is 4xx`() {
+        val breadcrumb = Breadcrumb.http("http://example.com", "POST", 417)
+        assertEquals("http://example.com", breadcrumb.data["url"])
+        assertEquals("POST", breadcrumb.data["method"])
+        assertEquals("http", breadcrumb.type)
+        assertEquals("http", breadcrumb.category)
+        assertEquals(SentryLevel.WARNING, breadcrumb.level)
+    }
+
+    @Test
+    fun `creates HTTP breadcrumb with error level if status code is 5xx`() {
+        val breadcrumb = Breadcrumb.http("http://example.com", "POST", 502)
+        assertEquals("http://example.com", breadcrumb.data["url"])
+        assertEquals("POST", breadcrumb.data["method"])
+        assertEquals("http", breadcrumb.type)
+        assertEquals("http", breadcrumb.category)
+        assertEquals(502, breadcrumb.data["status_code"])
+        assertEquals(SentryLevel.ERROR, breadcrumb.level)
+    }
+
+    @Test
+    fun `creates HTTP breadcrumb with null level if status code is not 5xx or 4xx`() {
+        val breadcrumb = Breadcrumb.http("http://example.com", "POST", 200)
+        assertEquals("http://example.com", breadcrumb.data["url"])
+        assertEquals("POST", breadcrumb.data["method"])
+        assertEquals("http", breadcrumb.type)
+        assertEquals("http", breadcrumb.category)
+        assertEquals(200, breadcrumb.data["status_code"])
+        assertEquals(null, breadcrumb.level)
     }
 
     @Test
@@ -190,5 +238,44 @@ class BreadcrumbTest {
         assertEquals("error", breadcrumb.type)
         assertEquals("message", breadcrumb.message)
         assertEquals(SentryLevel.ERROR, breadcrumb.level)
+    }
+
+    @Test
+    fun `serializes String keys for graphql data loader breadcrumb`() {
+        val breadcrumb = Breadcrumb.graphqlDataLoader(listOf("key1", "key2"), String::class.java, Throwable::class.java, null)
+        assertEquals("graphql", breadcrumb.type)
+        assertEquals("graphql.data_loader", breadcrumb.category)
+        assertEquals(listOf("key1", "key2"), breadcrumb.data["keys"] as? Iterable<String>)
+        assertEquals("java.lang.String", breadcrumb.data["key_type"])
+        assertEquals("java.lang.Throwable", breadcrumb.data["value_type"])
+        assertNull(breadcrumb.data["name"])
+    }
+
+    @Test
+    fun `serializes Long keys for graphql data loader breadcrumb`() {
+        val breadcrumb = Breadcrumb.graphqlDataLoader(listOf(java.lang.Long.valueOf(1), java.lang.Long.valueOf(2)), java.lang.Long::class.java, Throwable::class.java, null)
+        assertEquals("graphql", breadcrumb.type)
+        assertEquals("graphql.data_loader", breadcrumb.category)
+        assertEquals(listOf("1", "2"), breadcrumb.data["keys"] as? Iterable<String>)
+        assertEquals("java.lang.Long", breadcrumb.data["key_type"])
+        assertEquals("java.lang.Throwable", breadcrumb.data["value_type"])
+        assertNull(breadcrumb.data["name"])
+    }
+
+    @Test
+    fun `serializes object keys using toString for graphql data loader breadcrumb`() {
+        val breadcrumb = Breadcrumb.graphqlDataLoader(listOf(TestKey(1L), TestKey(2L)), TestKey::class.java, Throwable::class.java, null)
+        assertEquals("graphql", breadcrumb.type)
+        assertEquals("graphql.data_loader", breadcrumb.category)
+        assertEquals(listOf("1", "2"), breadcrumb.data["keys"] as? Iterable<String>)
+        assertEquals("io.sentry.BreadcrumbTest\$TestKey", breadcrumb.data["key_type"])
+        assertEquals("java.lang.Throwable", breadcrumb.data["value_type"])
+        assertNull(breadcrumb.data["name"])
+    }
+
+    class TestKey(val id: Long) {
+        override fun toString(): String {
+            return id.toString()
+        }
     }
 }

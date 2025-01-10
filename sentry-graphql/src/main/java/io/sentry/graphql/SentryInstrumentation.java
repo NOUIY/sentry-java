@@ -3,155 +3,151 @@ package io.sentry.graphql;
 import graphql.ExecutionResult;
 import graphql.execution.instrumentation.InstrumentationContext;
 import graphql.execution.instrumentation.InstrumentationState;
-import graphql.execution.instrumentation.SimpleInstrumentation;
+import graphql.execution.instrumentation.parameters.InstrumentationExecuteOperationParameters;
 import graphql.execution.instrumentation.parameters.InstrumentationExecutionParameters;
 import graphql.execution.instrumentation.parameters.InstrumentationFieldFetchParameters;
 import graphql.schema.DataFetcher;
-import graphql.schema.DataFetchingEnvironment;
-import graphql.schema.GraphQLNonNull;
-import graphql.schema.GraphQLObjectType;
-import graphql.schema.GraphQLOutputType;
-import io.sentry.HubAdapter;
-import io.sentry.IHub;
-import io.sentry.ISpan;
-import io.sentry.SpanStatus;
-import io.sentry.util.Objects;
+import io.sentry.SentryIntegrationPackageStorage;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
 
-public final class SentryInstrumentation extends SimpleInstrumentation {
-  private final @NotNull IHub hub;
-  private final @Nullable BeforeSpanCallback beforeSpan;
+@SuppressWarnings("deprecation")
+public final class SentryInstrumentation
+    extends graphql.execution.instrumentation.SimpleInstrumentation {
 
+  /**
+   * @deprecated please use {@link SentryGraphqlInstrumentation#SENTRY_SCOPES_CONTEXT_KEY}
+   */
+  @Deprecated
+  public static final @NotNull String SENTRY_SCOPES_CONTEXT_KEY =
+      SentryGraphqlInstrumentation.SENTRY_SCOPES_CONTEXT_KEY;
+
+  /**
+   * @deprecated please use {@link SentryGraphqlInstrumentation#SENTRY_EXCEPTIONS_CONTEXT_KEY}
+   */
+  @Deprecated
+  public static final @NotNull String SENTRY_EXCEPTIONS_CONTEXT_KEY =
+      SentryGraphqlInstrumentation.SENTRY_EXCEPTIONS_CONTEXT_KEY;
+
+  private static final String TRACE_ORIGIN = "auto.graphql.graphql";
+  private final @NotNull SentryGraphqlInstrumentation instrumentation;
+
+  /**
+   * @param beforeSpan callback when a span is created
+   * @param subscriptionHandler can report subscription errors
+   * @param captureRequestBodyForNonSubscriptions false if request bodies should not be captured by
+   *     this integration for query and mutation operations. This can be used to prevent unnecessary
+   *     work by not adding the request body when another integration will add it anyways, as is the
+   *     case with our spring integration for WebMVC.
+   */
   public SentryInstrumentation(
-      final @NotNull IHub hub, final @Nullable BeforeSpanCallback beforeSpan) {
-    this.hub = Objects.requireNonNull(hub, "hub is required");
-    this.beforeSpan = beforeSpan;
+      final @Nullable SentryGraphqlInstrumentation.BeforeSpanCallback beforeSpan,
+      final @NotNull SentrySubscriptionHandler subscriptionHandler,
+      final boolean captureRequestBodyForNonSubscriptions) {
+    this(
+        beforeSpan,
+        subscriptionHandler,
+        new ExceptionReporter(captureRequestBodyForNonSubscriptions),
+        new ArrayList<>());
   }
 
-  public SentryInstrumentation(final @Nullable BeforeSpanCallback beforeSpan) {
-    this(HubAdapter.getInstance(), beforeSpan);
+  /**
+   * @param beforeSpan callback when a span is created
+   * @param subscriptionHandler can report subscription errors
+   * @param captureRequestBodyForNonSubscriptions false if request bodies should not be captured by
+   *     this integration for query and mutation operations. This can be used to prevent unnecessary
+   *     work by not adding the request body when another integration will add it anyways, as is the
+   *     case with our spring integration for WebMVC.
+   * @param ignoredErrorTypes list of error types that should not be captured and sent to Sentry
+   */
+  public SentryInstrumentation(
+      final @Nullable SentryGraphqlInstrumentation.BeforeSpanCallback beforeSpan,
+      final @NotNull SentrySubscriptionHandler subscriptionHandler,
+      final boolean captureRequestBodyForNonSubscriptions,
+      final @NotNull List<String> ignoredErrorTypes) {
+    this(
+        beforeSpan,
+        subscriptionHandler,
+        new ExceptionReporter(captureRequestBodyForNonSubscriptions),
+        ignoredErrorTypes);
   }
 
-  public SentryInstrumentation(final @NotNull IHub hub) {
-    this(hub, null);
+  @TestOnly
+  public SentryInstrumentation(
+      final @Nullable SentryGraphqlInstrumentation.BeforeSpanCallback beforeSpan,
+      final @NotNull SentrySubscriptionHandler subscriptionHandler,
+      final @NotNull ExceptionReporter exceptionReporter,
+      final @NotNull List<String> ignoredErrorTypes) {
+    this.instrumentation =
+        new SentryGraphqlInstrumentation(
+            beforeSpan, subscriptionHandler, exceptionReporter, ignoredErrorTypes, TRACE_ORIGIN);
+    SentryIntegrationPackageStorage.getInstance().addIntegration("GraphQL");
+    SentryIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.sentry:sentry-graphql", BuildConfig.VERSION_NAME);
   }
 
-  public SentryInstrumentation() {
-    this(HubAdapter.getInstance());
+  /**
+   * @param subscriptionHandler can report subscription errors
+   * @param captureRequestBodyForNonSubscriptions false if request bodies should not be captured by
+   *     this integration for query and mutation operations. This can be used to prevent unnecessary
+   *     work by not adding the request body when another integration will add it anyways, as is the
+   *     case with our spring integration for WebMVC.
+   */
+  public SentryInstrumentation(
+      final @NotNull SentrySubscriptionHandler subscriptionHandler,
+      final boolean captureRequestBodyForNonSubscriptions) {
+    this(null, subscriptionHandler, captureRequestBodyForNonSubscriptions);
   }
 
   @Override
   public @NotNull InstrumentationState createState() {
-    return new TracingState();
+    return instrumentation.createState();
   }
 
   @Override
   public @NotNull InstrumentationContext<ExecutionResult> beginExecution(
       final @NotNull InstrumentationExecutionParameters parameters) {
-    final TracingState tracingState = parameters.getInstrumentationState();
-    tracingState.setTransaction(hub.getSpan());
+    final SentryGraphqlInstrumentation.TracingState tracingState =
+        parameters.getInstrumentationState();
+    instrumentation.beginExecution(parameters, tracingState);
     return super.beginExecution(parameters);
   }
 
   @Override
-  @SuppressWarnings("FutureReturnValueIgnored")
+  public CompletableFuture<ExecutionResult> instrumentExecutionResult(
+      ExecutionResult executionResult, InstrumentationExecutionParameters parameters) {
+    return super.instrumentExecutionResult(executionResult, parameters)
+        .whenComplete(
+            (result, exception) -> {
+              instrumentation.instrumentExecutionResultComplete(parameters, result, exception);
+            });
+  }
+
+  @Override
+  public @NotNull InstrumentationContext<ExecutionResult> beginExecuteOperation(
+      final @NotNull InstrumentationExecuteOperationParameters parameters) {
+    instrumentation.beginExecuteOperation(parameters);
+    return super.beginExecuteOperation(parameters);
+  }
+
+  @Override
+  @SuppressWarnings({"FutureReturnValueIgnored", "deprecation"})
   public @NotNull DataFetcher<?> instrumentDataFetcher(
       final @NotNull DataFetcher<?> dataFetcher,
       final @NotNull InstrumentationFieldFetchParameters parameters) {
-    // We only care about user code
-    if (parameters.isTrivialDataFetcher()) {
-      return dataFetcher;
-    }
-
-    return environment -> {
-      final TracingState tracingState = parameters.getInstrumentationState();
-      final ISpan transaction = tracingState.getTransaction();
-      if (transaction != null) {
-        final ISpan span = transaction.startChild(findDataFetcherTag(parameters));
-        try {
-          final Object result = dataFetcher.get(environment);
-          if (result instanceof CompletableFuture) {
-            ((CompletableFuture<?>) result)
-                .whenComplete(
-                    (r, ex) -> {
-                      if (ex != null) {
-                        span.setThrowable(ex);
-                        span.setStatus(SpanStatus.INTERNAL_ERROR);
-                      } else {
-                        span.setStatus(SpanStatus.OK);
-                      }
-                      finish(span, environment, r);
-                    });
-          } else {
-            span.setStatus(SpanStatus.OK);
-            finish(span, environment, result);
-          }
-          return result;
-        } catch (Throwable e) {
-          span.setThrowable(e);
-          span.setStatus(SpanStatus.INTERNAL_ERROR);
-          finish(span, environment);
-          throw e;
-        }
-      } else {
-        return dataFetcher.get(environment);
-      }
-    };
+    final SentryGraphqlInstrumentation.TracingState tracingState =
+        parameters.getInstrumentationState();
+    return instrumentation.instrumentDataFetcher(dataFetcher, parameters, tracingState);
   }
 
-  private void finish(
-      final @NotNull ISpan span,
-      final @NotNull DataFetchingEnvironment environment,
-      final @Nullable Object result) {
-    if (beforeSpan != null) {
-      final ISpan newSpan = beforeSpan.execute(span, environment, result);
-      if (newSpan == null) {
-        // span is dropped
-        span.getSpanContext().setSampled(false);
-      } else {
-        newSpan.finish();
-      }
-    } else {
-      span.finish();
-    }
-  }
-
-  private void finish(
-      final @NotNull ISpan span, final @NotNull DataFetchingEnvironment environment) {
-    finish(span, environment, null);
-  }
-
-  private @NotNull String findDataFetcherTag(
-      final @NotNull InstrumentationFieldFetchParameters parameters) {
-    final GraphQLOutputType type = parameters.getExecutionStepInfo().getParent().getType();
-    GraphQLObjectType parent;
-    if (type instanceof GraphQLNonNull) {
-      parent = (GraphQLObjectType) ((GraphQLNonNull) type).getWrappedType();
-    } else {
-      parent = (GraphQLObjectType) type;
-    }
-
-    return parent.getName() + "." + parameters.getExecutionStepInfo().getPath().getSegmentName();
-  }
-
-  static final class TracingState implements InstrumentationState {
-    private @Nullable ISpan transaction;
-
-    public @Nullable ISpan getTransaction() {
-      return transaction;
-    }
-
-    public void setTransaction(final @Nullable ISpan transaction) {
-      this.transaction = transaction;
-    }
-  }
-
+  /**
+   * @deprecated please use {@link SentryGraphqlInstrumentation.BeforeSpanCallback}
+   */
+  @Deprecated
   @FunctionalInterface
-  public interface BeforeSpanCallback {
-    @Nullable
-    ISpan execute(
-        @NotNull ISpan span, @NotNull DataFetchingEnvironment environment, @Nullable Object result);
-  }
+  public interface BeforeSpanCallback extends SentryGraphqlInstrumentation.BeforeSpanCallback {}
 }

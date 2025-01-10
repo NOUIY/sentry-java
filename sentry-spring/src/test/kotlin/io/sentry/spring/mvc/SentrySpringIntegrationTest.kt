@@ -1,9 +1,10 @@
 package io.sentry.spring.mvc
 
-import io.sentry.IHub
+import io.sentry.IScopes
 import io.sentry.ITransportFactory
 import io.sentry.Sentry
 import io.sentry.SentryOptions
+import io.sentry.SpanDataConvention
 import io.sentry.SpanStatus
 import io.sentry.checkEvent
 import io.sentry.checkTransaction
@@ -14,6 +15,8 @@ import io.sentry.spring.SentryTaskDecorator
 import io.sentry.spring.SentryUserFilter
 import io.sentry.spring.SentryUserProvider
 import io.sentry.spring.SpringSecuritySentryUserProvider
+import io.sentry.spring.exception.SentryCaptureExceptionParameter
+import io.sentry.spring.exception.SentryCaptureExceptionParameterConfiguration
 import io.sentry.spring.tracing.SentrySpanClientWebRequestFilter
 import io.sentry.spring.tracing.SentryTracingConfiguration
 import io.sentry.spring.tracing.SentryTracingFilter
@@ -63,6 +66,7 @@ import org.springframework.web.bind.annotation.ControllerAdvice
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.reactive.function.client.ExchangeFilterFunctions
 import org.springframework.web.reactive.function.client.WebClient
@@ -98,7 +102,10 @@ class SentrySpringIntegrationTest {
     lateinit var someService: SomeService
 
     @Autowired
-    lateinit var hub: IHub
+    lateinit var anotherService: AnotherService
+
+    @Autowired
+    lateinit var scopes: IScopes
 
     @LocalServerPort
     var port: Int? = null
@@ -131,6 +138,24 @@ class SentrySpringIntegrationTest {
 
     @Test
     fun `attaches request body to SentryEvents`() {
+        val restTemplate = TestRestTemplate().withBasicAuth("user", "password")
+        val headers = HttpHeaders().apply {
+            this.contentType = MediaType.APPLICATION_JSON
+        }
+        val httpEntity = HttpEntity("""{"body":"content"}""", headers)
+        restTemplate.exchange("http://localhost:$port/bodyAsParam", HttpMethod.POST, httpEntity, Void::class.java)
+
+        verify(transport).send(
+            checkEvent { event ->
+                assertThat(event.request).isNotNull()
+                assertThat(event.request!!.data).isEqualTo("""{"body":"content"}""")
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `attaches request body to SentryEvents on empty ControllerMethod Params`() {
         val restTemplate = TestRestTemplate().withBasicAuth("user", "password")
         val headers = HttpHeaders().apply {
             this.contentType = MediaType.APPLICATION_JSON
@@ -215,6 +240,30 @@ class SentrySpringIntegrationTest {
     }
 
     @Test
+    fun `calling a method annotated with @SentryCaptureException captures exception`() {
+        val exception = java.lang.RuntimeException("test exception")
+        anotherService.aMethodThatTakesAnException(exception)
+        verify(transport).send(
+            checkEvent {
+                assertThat(it.exceptions!!.first().value).isEqualTo(exception.message)
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
+    fun `calling a method annotated with @SentryCaptureException captures exception in later param`() {
+        val exception = java.lang.RuntimeException("test exception")
+        anotherService.aMethodThatTakesAnExceptionAsLaterParam("a", "b", exception)
+        verify(transport).send(
+            checkEvent {
+                assertThat(it.exceptions!!.first().value).isEqualTo(exception.message)
+            },
+            anyOrNull()
+        )
+    }
+
+    @Test
     fun `calling a method annotated with @SentryTransaction creates transaction`() {
         someService.aMethod()
         verify(transport).send(
@@ -230,7 +279,7 @@ class SentrySpringIntegrationTest {
         try {
             someService.aMethodThrowing()
         } catch (e: Exception) {
-            hub.captureException(e)
+            scopes.captureException(e)
         }
         verify(transport).send(
             checkEvent {
@@ -246,7 +295,7 @@ class SentrySpringIntegrationTest {
         try {
             someService.aMethodWithInnerSpanThrowing()
         } catch (e: Exception) {
-            hub.captureException(e)
+            scopes.captureException(e)
         }
         verify(transport).send(
             checkEvent {
@@ -307,6 +356,7 @@ class SentrySpringIntegrationTest {
                     val span = transaction.spans.first()
                     assertThat(span.op).isEqualTo("http.client")
                     assertThat(span.description).isEqualTo("GET http://localhost:$port/hello")
+                    assertThat(span.data?.get(SpanDataConvention.HTTP_STATUS_CODE_KEY)).isEqualTo(200)
                     assertThat(span.status).isEqualTo(SpanStatus.OK)
                 },
                 anyOrNull()
@@ -317,7 +367,7 @@ class SentrySpringIntegrationTest {
 
 @SpringBootApplication
 @EnableSentry(dsn = "http://key@localhost/proj", sendDefaultPii = true, maxRequestBodySize = SentryOptions.RequestSize.MEDIUM)
-@Import(SentryTracingConfiguration::class)
+@Import(SentryTracingConfiguration::class, SentryCaptureExceptionParameterConfiguration::class)
 open class App {
 
     @Bean
@@ -339,20 +389,20 @@ open class App {
     open fun springSecuritySentryUserProvider(sentryOptions: SentryOptions) = SpringSecuritySentryUserProvider(sentryOptions)
 
     @Bean
-    open fun sentryUserFilter(hub: IHub, @Lazy sentryUserProviders: List<SentryUserProvider>) = FilterRegistrationBean<SentryUserFilter>().apply {
-        this.filter = SentryUserFilter(hub, sentryUserProviders)
+    open fun sentryUserFilter(scopes: IScopes, @Lazy sentryUserProviders: List<SentryUserProvider>) = FilterRegistrationBean<SentryUserFilter>().apply {
+        this.filter = SentryUserFilter(scopes, sentryUserProviders)
         this.order = Ordered.LOWEST_PRECEDENCE
     }
 
     @Bean
-    open fun sentrySpringFilter(hub: IHub) = FilterRegistrationBean<SentrySpringFilter>().apply {
-        this.filter = SentrySpringFilter(hub)
+    open fun sentrySpringFilter(scopes: IScopes) = FilterRegistrationBean<SentrySpringFilter>().apply {
+        this.filter = SentrySpringFilter(scopes)
         this.order = Ordered.HIGHEST_PRECEDENCE
     }
 
     @Bean
-    open fun sentryTracingFilter(hub: IHub) = FilterRegistrationBean<SentryTracingFilter>().apply {
-        this.filter = SentryTracingFilter(hub)
+    open fun sentryTracingFilter(scopes: IScopes) = FilterRegistrationBean<SentryTracingFilter>().apply {
+        this.filter = SentryTracingFilter(scopes)
         this.order = Ordered.HIGHEST_PRECEDENCE + 1 // must run after SentrySpringFilter
     }
 
@@ -360,14 +410,23 @@ open class App {
     open fun sentryTaskDecorator() = SentryTaskDecorator()
 
     @Bean
-    open fun webClient(hub: IHub): WebClient {
+    open fun webClient(scopes: IScopes): WebClient {
         return WebClient.builder()
             .filter(
                 ExchangeFilterFunctions
                     .basicAuthentication("user", "password")
             )
-            .filter(SentrySpanClientWebRequestFilter(hub)).build()
+            .filter(SentrySpanClientWebRequestFilter(scopes)).build()
     }
+}
+
+@Service
+open class AnotherService {
+    @SentryCaptureExceptionParameter
+    open fun aMethodThatTakesAnException(e: Exception) {}
+
+    @SentryCaptureExceptionParameter
+    open fun aMethodThatTakesAnExceptionAsLaterParam(a: String, b: String, e: Exception) {}
 }
 
 @Service
@@ -409,6 +468,11 @@ class HelloController(private val webClient: WebClient, private val env: Environ
 
     @PostMapping("/body")
     fun body() {
+        Sentry.captureMessage("body")
+    }
+
+    @PostMapping("/bodyAsParam")
+    fun bodyWithReadingBodyInController(@RequestBody body: String) {
         Sentry.captureMessage("body")
     }
 

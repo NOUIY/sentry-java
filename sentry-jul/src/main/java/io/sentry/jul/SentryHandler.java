@@ -6,11 +6,15 @@ import static io.sentry.TypeCheckHint.SENTRY_SYNTHETIC_EXCEPTION;
 import com.jakewharton.nopen.annotation.Open;
 import io.sentry.Breadcrumb;
 import io.sentry.Hint;
-import io.sentry.HubAdapter;
+import io.sentry.InitPriority;
+import io.sentry.ScopesAdapter;
 import io.sentry.Sentry;
 import io.sentry.SentryEvent;
+import io.sentry.SentryIntegrationPackageStorage;
 import io.sentry.SentryLevel;
 import io.sentry.SentryOptions;
+import io.sentry.exception.ExceptionMechanismException;
+import io.sentry.protocol.Mechanism;
 import io.sentry.protocol.Message;
 import io.sentry.protocol.SdkVersion;
 import io.sentry.util.CollectionUtils;
@@ -33,6 +37,7 @@ import org.slf4j.MDC;
 /** Logging handler in charge of sending the java.util.logging records to a Sentry server. */
 @Open
 public class SentryHandler extends Handler {
+  public static final String MECHANISM_TYPE = "JulSentryHandler";
   /** Name of the {@link SentryEvent} extra property containing the Thread id. */
   public static final String THREAD_ID = "thread_id";
   /**
@@ -65,11 +70,11 @@ public class SentryHandler extends Handler {
     if (configureFromLogManager) {
       retrieveProperties();
     }
-    if (!Sentry.isEnabled()) {
-      options.setEnableExternalConfiguration(true);
-      options.setSdkVersion(createSdkVersion(options));
-      Sentry.init(options);
-    }
+    options.setEnableExternalConfiguration(true);
+    options.setInitPriority(InitPriority.LOWEST);
+    options.setSdkVersion(createSdkVersion(options));
+    Sentry.init(options);
+    addPackageAndIntegrationInfo();
   }
 
   @Override
@@ -194,16 +199,20 @@ public class SentryHandler extends Handler {
 
     final Throwable throwable = record.getThrown();
     if (throwable != null) {
-      event.setThrowable(throwable);
+      final Mechanism mechanism = new Mechanism();
+      mechanism.setType(MECHANISM_TYPE);
+      final Throwable mechanismException =
+          new ExceptionMechanismException(mechanism, throwable, Thread.currentThread());
+      event.setThrowable(mechanismException);
     }
     Map<String, String> mdcProperties = MDC.getMDCAdapter().getCopyOfContextMap();
     if (mdcProperties != null) {
       mdcProperties =
           CollectionUtils.filterMapEntries(mdcProperties, entry -> entry.getValue() != null);
       if (!mdcProperties.isEmpty()) {
-        // get tags from HubAdapter options to allow getting the correct tags if Sentry has been
+        // get tags from ScopesAdapter options to allow getting the correct tags if Sentry has been
         // initialized somewhere else
-        final List<String> contextTags = HubAdapter.getInstance().getOptions().getContextTags();
+        final List<String> contextTags = ScopesAdapter.getInstance().getOptions().getContextTags();
         if (!contextTags.isEmpty()) {
           for (final String contextTag : contextTags) {
             // if mdc tag is listed in SentryOptions, apply as event tag
@@ -276,9 +285,14 @@ public class SentryHandler extends Handler {
     final String version = BuildConfig.VERSION_NAME;
 
     sdkVersion = SdkVersion.updateSdkVersion(sdkVersion, name, version);
-    sdkVersion.addPackage("maven:io.sentry:sentry-jul", version);
 
     return sdkVersion;
+  }
+
+  private void addPackageAndIntegrationInfo() {
+    SentryIntegrationPackageStorage.getInstance()
+        .addPackage("maven:io.sentry:sentry-jul", BuildConfig.VERSION_NAME);
+    SentryIntegrationPackageStorage.getInstance().addIntegration("Jul");
   }
 
   public void setPrintfStyle(final boolean printfStyle) {

@@ -8,97 +8,41 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 public final class TransactionContext extends SpanContext {
-  private final @NotNull String name;
-  private final @NotNull TransactionNameSource transactionNameSource;
+  public static final @NotNull String DEFAULT_TRANSACTION_NAME = "<unlabeled transaction>";
+  private static final @NotNull TransactionNameSource DEFAULT_NAME_SOURCE =
+      TransactionNameSource.CUSTOM;
+  private static final @NotNull String DEFAULT_OPERATION = "default";
+  private @NotNull String name;
+  private @NotNull TransactionNameSource transactionNameSource;
   private @Nullable TracesSamplingDecision parentSamplingDecision;
-  private @Nullable Baggage baggage;
-  private @NotNull Instrumenter instrumenter = Instrumenter.SENTRY;
+  private boolean isForNextAppStart = false;
 
-  /**
-   * Creates {@link TransactionContext} from sentry-trace header.
-   *
-   * @param name - the transaction name
-   * @param operation - the operation
-   * @param sentryTrace - the sentry-trace header
-   * @return the transaction contexts
-   */
-  public static @NotNull TransactionContext fromSentryTrace(
-      final @NotNull String name,
-      final @NotNull String operation,
-      final @NotNull SentryTraceHeader sentryTrace) {
-    return fromSentryTrace(name, TransactionNameSource.CUSTOM, operation, sentryTrace, null, null);
-  }
-
-  /**
-   * Creates {@link TransactionContext} from sentry-trace header.
-   *
-   * @param name - the transaction name
-   * @param transactionNameSource - source of the transaction name
-   * @param operation - the operation
-   * @param sentryTrace - the sentry-trace header
-   * @return the transaction contexts
-   */
   @ApiStatus.Internal
-  public static @NotNull TransactionContext fromSentryTrace(
-      final @NotNull String name,
-      final @NotNull TransactionNameSource transactionNameSource,
-      final @NotNull String operation,
-      final @NotNull SentryTraceHeader sentryTrace) {
-    @Nullable Boolean parentSampled = sentryTrace.isSampled();
-    return new TransactionContext(
-        name,
-        operation,
-        sentryTrace.getTraceId(),
-        new SpanId(),
-        transactionNameSource,
-        sentryTrace.getSpanId(),
-        parentSampled == null ? null : new TracesSamplingDecision(parentSampled),
-        null);
-  }
-
-  /**
-   * Creates {@link TransactionContext} from sentry-trace header.
-   *
-   * @param name - the transaction name
-   * @param transactionNameSource - source of the transaction name
-   * @param operation - the operation
-   * @param sentryTrace - the sentry-trace header
-   * @param baggage - the baggage header
-   * @return the transaction contexts
-   */
-  @ApiStatus.Internal
-  public static @NotNull TransactionContext fromSentryTrace(
-      final @NotNull String name,
-      final @NotNull TransactionNameSource transactionNameSource,
-      final @NotNull String operation,
-      final @NotNull SentryTraceHeader sentryTrace,
-      final @Nullable Baggage baggage,
-      final @Nullable SpanId spanId) {
-    @Nullable Boolean parentSampled = sentryTrace.isSampled();
+  public static TransactionContext fromPropagationContext(
+      final @NotNull PropagationContext propagationContext) {
+    @Nullable Boolean parentSampled = propagationContext.isSampled();
     TracesSamplingDecision samplingDecision =
         parentSampled == null ? null : new TracesSamplingDecision(parentSampled);
+
+    @Nullable Baggage baggage = propagationContext.getBaggage();
 
     if (baggage != null) {
       baggage.freeze();
 
       Double sampleRate = baggage.getSampleRateDouble();
-      Boolean sampled = parentSampled != null ? parentSampled.booleanValue() : true;
-      if (sampleRate != null) {
-        samplingDecision = new TracesSamplingDecision(sampled, sampleRate);
-      } else {
-        samplingDecision = new TracesSamplingDecision(sampled);
+      if (parentSampled != null) {
+        if (sampleRate != null) {
+          samplingDecision = new TracesSamplingDecision(parentSampled.booleanValue(), sampleRate);
+        } else {
+          samplingDecision = new TracesSamplingDecision(parentSampled.booleanValue());
+        }
       }
     }
 
-    final @NotNull SpanId spanIdToUse = spanId == null ? new SpanId() : spanId;
-
     return new TransactionContext(
-        name,
-        operation,
-        sentryTrace.getTraceId(),
-        spanIdToUse,
-        transactionNameSource,
-        sentryTrace.getSpanId(),
+        propagationContext.getTraceId(),
+        propagationContext.getSpanId(),
+        propagationContext.getParentSpanId(),
         samplingDecision,
         baggage);
   }
@@ -150,18 +94,15 @@ public final class TransactionContext extends SpanContext {
 
   @ApiStatus.Internal
   public TransactionContext(
-      final @NotNull String name,
-      final @NotNull String operation,
       final @NotNull SentryId traceId,
       final @NotNull SpanId spanId,
-      final @NotNull TransactionNameSource transactionNameSource,
       final @Nullable SpanId parentSpanId,
       final @Nullable TracesSamplingDecision parentSamplingDecision,
       final @Nullable Baggage baggage) {
-    super(traceId, spanId, operation, parentSpanId, null);
-    this.name = Objects.requireNonNull(name, "name is required");
+    super(traceId, spanId, DEFAULT_OPERATION, parentSpanId, null);
+    this.name = DEFAULT_TRANSACTION_NAME;
     this.parentSamplingDecision = parentSamplingDecision;
-    this.transactionNameSource = transactionNameSource;
+    this.transactionNameSource = DEFAULT_NAME_SOURCE;
     this.baggage = baggage;
   }
 
@@ -179,10 +120,6 @@ public final class TransactionContext extends SpanContext {
 
   public @Nullable TracesSamplingDecision getParentSamplingDecision() {
     return parentSamplingDecision;
-  }
-
-  public @Nullable Baggage getBaggage() {
-    return baggage;
   }
 
   public void setParentSampled(final @Nullable Boolean parentSampled) {
@@ -209,11 +146,27 @@ public final class TransactionContext extends SpanContext {
     return transactionNameSource;
   }
 
-  public @NotNull Instrumenter getInstrumenter() {
-    return instrumenter;
+  public void setName(final @NotNull String name) {
+    this.name = Objects.requireNonNull(name, "name is required");
   }
 
-  public void setInstrumenter(final @NotNull Instrumenter instrumenter) {
-    this.instrumenter = instrumenter;
+  public void setTransactionNameSource(final @NotNull TransactionNameSource transactionNameSource) {
+    this.transactionNameSource = transactionNameSource;
+  }
+
+  @ApiStatus.Internal
+  public void setForNextAppStart(final boolean forNextAppStart) {
+    isForNextAppStart = forNextAppStart;
+  }
+
+  /**
+   * Whether this {@link TransactionContext} evaluates for the next app start. If this is true, it
+   * gets called only once when the SDK initializes. This is set only if {@link
+   * SentryOptions#isEnableAppStartProfiling()} is true.
+   *
+   * @return True if this {@link TransactionContext} will be used for the next app start.
+   */
+  public boolean isForNextAppStart() {
+    return isForNextAppStart;
   }
 }

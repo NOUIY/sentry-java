@@ -2,10 +2,10 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.util.CollectionUtils;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
@@ -128,7 +128,7 @@ public final class SentryStackTrace implements JsonUnknown, JsonSerializable {
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (frames != null) {
@@ -154,7 +154,7 @@ public final class SentryStackTrace implements JsonUnknown, JsonSerializable {
     @SuppressWarnings("unchecked")
     @Override
     public @NotNull SentryStackTrace deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       SentryStackTrace sentryStackTrace = new SentryStackTrace();
       Map<String, Object> unknown = null;
       reader.beginObject();
@@ -162,7 +162,8 @@ public final class SentryStackTrace implements JsonUnknown, JsonSerializable {
         final String nextName = reader.nextName();
         switch (nextName) {
           case JsonKeys.FRAMES:
-            sentryStackTrace.frames = reader.nextList(logger, new SentryStackFrame.Deserializer());
+            sentryStackTrace.frames =
+                reader.nextListOrNull(logger, new SentryStackFrame.Deserializer());
             break;
           case JsonKeys.REGISTERS:
             sentryStackTrace.registers =

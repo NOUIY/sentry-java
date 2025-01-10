@@ -9,6 +9,7 @@ import io.sentry.protocol.Contexts;
 import io.sentry.protocol.DebugImage;
 import io.sentry.protocol.DebugMeta;
 import io.sentry.protocol.Device;
+import io.sentry.protocol.Geo;
 import io.sentry.protocol.Gpu;
 import io.sentry.protocol.MeasurementValue;
 import io.sentry.protocol.Mechanism;
@@ -26,6 +27,15 @@ import io.sentry.protocol.SentryStackTrace;
 import io.sentry.protocol.SentryThread;
 import io.sentry.protocol.SentryTransaction;
 import io.sentry.protocol.User;
+import io.sentry.protocol.ViewHierarchy;
+import io.sentry.protocol.ViewHierarchyNode;
+import io.sentry.rrweb.RRWebBreadcrumbEvent;
+import io.sentry.rrweb.RRWebEventType;
+import io.sentry.rrweb.RRWebInteractionEvent;
+import io.sentry.rrweb.RRWebInteractionMoveEvent;
+import io.sentry.rrweb.RRWebMetaEvent;
+import io.sentry.rrweb.RRWebSpanEvent;
+import io.sentry.rrweb.RRWebVideoEvent;
 import io.sentry.util.Objects;
 import java.io.BufferedOutputStream;
 import java.io.BufferedWriter;
@@ -37,6 +47,7 @@ import java.io.Reader;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.nio.charset.Charset;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import org.jetbrains.annotations.NotNull;
@@ -85,6 +96,15 @@ public final class JsonSerializer implements ISerializer {
     deserializersByClass.put(
         ProfileMeasurementValue.class, new ProfileMeasurementValue.Deserializer());
     deserializersByClass.put(Request.class, new Request.Deserializer());
+    deserializersByClass.put(ReplayRecording.class, new ReplayRecording.Deserializer());
+    deserializersByClass.put(RRWebBreadcrumbEvent.class, new RRWebBreadcrumbEvent.Deserializer());
+    deserializersByClass.put(RRWebEventType.class, new RRWebEventType.Deserializer());
+    deserializersByClass.put(RRWebInteractionEvent.class, new RRWebInteractionEvent.Deserializer());
+    deserializersByClass.put(
+        RRWebInteractionMoveEvent.class, new RRWebInteractionMoveEvent.Deserializer());
+    deserializersByClass.put(RRWebMetaEvent.class, new RRWebMetaEvent.Deserializer());
+    deserializersByClass.put(RRWebSpanEvent.class, new RRWebSpanEvent.Deserializer());
+    deserializersByClass.put(RRWebVideoEvent.class, new RRWebVideoEvent.Deserializer());
     deserializersByClass.put(SdkInfo.class, new SdkInfo.Deserializer());
     deserializersByClass.put(SdkVersion.class, new SdkVersion.Deserializer());
     deserializersByClass.put(SentryEnvelopeHeader.class, new SentryEnvelopeHeader.Deserializer());
@@ -94,11 +114,15 @@ public final class JsonSerializer implements ISerializer {
     deserializersByClass.put(SentryException.class, new SentryException.Deserializer());
     deserializersByClass.put(SentryItemType.class, new SentryItemType.Deserializer());
     deserializersByClass.put(SentryLevel.class, new SentryLevel.Deserializer());
+    deserializersByClass.put(SentryLockReason.class, new SentryLockReason.Deserializer());
     deserializersByClass.put(SentryPackage.class, new SentryPackage.Deserializer());
     deserializersByClass.put(SentryRuntime.class, new SentryRuntime.Deserializer());
+    deserializersByClass.put(SentryReplayEvent.class, new SentryReplayEvent.Deserializer());
     deserializersByClass.put(SentrySpan.class, new SentrySpan.Deserializer());
     deserializersByClass.put(SentryStackFrame.class, new SentryStackFrame.Deserializer());
     deserializersByClass.put(SentryStackTrace.class, new SentryStackTrace.Deserializer());
+    deserializersByClass.put(
+        SentryAppStartProfilingOptions.class, new SentryAppStartProfilingOptions.Deserializer());
     deserializersByClass.put(SentryThread.class, new SentryThread.Deserializer());
     deserializersByClass.put(SentryTransaction.class, new SentryTransaction.Deserializer());
     deserializersByClass.put(Session.class, new Session.Deserializer());
@@ -106,20 +130,48 @@ public final class JsonSerializer implements ISerializer {
     deserializersByClass.put(SpanId.class, new SpanId.Deserializer());
     deserializersByClass.put(SpanStatus.class, new SpanStatus.Deserializer());
     deserializersByClass.put(User.class, new User.Deserializer());
+    deserializersByClass.put(Geo.class, new Geo.Deserializer());
     deserializersByClass.put(UserFeedback.class, new UserFeedback.Deserializer());
     deserializersByClass.put(ClientReport.class, new ClientReport.Deserializer());
+    deserializersByClass.put(ViewHierarchyNode.class, new ViewHierarchyNode.Deserializer());
+    deserializersByClass.put(ViewHierarchy.class, new ViewHierarchy.Deserializer());
   }
 
   // Deserialize
 
+  @SuppressWarnings("unchecked")
+  @Override
+  public <T, R> @Nullable T deserializeCollection(
+      @NotNull Reader reader,
+      @NotNull Class<T> clazz,
+      @Nullable JsonDeserializer<R> elementDeserializer) {
+    try (JsonObjectReader jsonObjectReader = new JsonObjectReader(reader)) {
+      if (Collection.class.isAssignableFrom(clazz)) {
+        if (elementDeserializer == null) {
+          // if the object has no known deserializer we do best effort and deserialize it as map
+          return (T) jsonObjectReader.nextObjectOrNull();
+        }
+
+        return (T) jsonObjectReader.nextListOrNull(options.getLogger(), elementDeserializer);
+      } else {
+        return (T) jsonObjectReader.nextObjectOrNull();
+      }
+    } catch (Throwable e) {
+      options.getLogger().log(SentryLevel.ERROR, "Error when deserializing", e);
+      return null;
+    }
+  }
+
+  @SuppressWarnings("unchecked")
   @Override
   public <T> @Nullable T deserialize(@NotNull Reader reader, @NotNull Class<T> clazz) {
-    try {
-      JsonObjectReader jsonObjectReader = new JsonObjectReader(reader);
+    try (JsonObjectReader jsonObjectReader = new JsonObjectReader(reader)) {
       JsonDeserializer<?> deserializer = deserializersByClass.get(clazz);
       if (deserializer != null) {
         Object object = deserializer.deserialize(jsonObjectReader, options.getLogger());
         return clazz.cast(object);
+      } else if (isKnownPrimitive(clazz)) {
+        return (T) jsonObjectReader.nextObjectOrNull();
       } else {
         return null; // No way to deserialize objects we don't know about.
       }
@@ -148,7 +200,7 @@ public final class JsonSerializer implements ISerializer {
     Objects.requireNonNull(writer, "The Writer object is required.");
 
     if (options.getLogger().isEnabled(SentryLevel.DEBUG)) {
-      String serialized = serializeToString(entity, true);
+      String serialized = serializeToString(entity, options.isEnablePrettySerializationOutput());
       options.getLogger().log(SentryLevel.DEBUG, "Serializing object: %s", serialized);
     }
     JsonObjectWriter jsonObjectWriter = new JsonObjectWriter(writer, options.getMaxDepth());
@@ -218,5 +270,12 @@ public final class JsonSerializer implements ISerializer {
     }
     jsonObjectWriter.value(options.getLogger(), object);
     return stringWriter.toString();
+  }
+
+  private <T> boolean isKnownPrimitive(final @NotNull Class<T> clazz) {
+    return clazz.isArray()
+        || Collection.class.isAssignableFrom(clazz)
+        || String.class.isAssignableFrom(clazz)
+        || Map.class.isAssignableFrom(clazz);
   }
 }

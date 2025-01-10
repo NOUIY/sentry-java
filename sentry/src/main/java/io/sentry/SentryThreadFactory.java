@@ -8,12 +8,14 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
 
 /** class responsible for converting Java Threads to SentryThreads */
-final class SentryThreadFactory {
+@ApiStatus.Internal
+public final class SentryThreadFactory {
 
   /** the SentryStackTraceFactory */
   private final @NotNull SentryStackTraceFactory sentryStackTraceFactory;
@@ -47,7 +49,7 @@ final class SentryThreadFactory {
     final Thread currentThread = Thread.currentThread();
     threads.put(currentThread, currentThread.getStackTrace());
 
-    return getCurrentThreads(threads, null);
+    return getCurrentThreads(threads, null, false);
   }
 
   /**
@@ -55,11 +57,19 @@ final class SentryThreadFactory {
    * the crashed thread.
    *
    * @param mechanismThreadIds list of threadIds that came from exception mechanism
+   * @param ignoreCurrentThread if the current thread should be ignored when marking threads as
+   *     crashed. This is the case for e.g. watchdog threads which are not the one erroring.
    * @return a list of SentryThread
    */
   @Nullable
+  List<SentryThread> getCurrentThreads(
+      final @Nullable List<Long> mechanismThreadIds, final boolean ignoreCurrentThread) {
+    return getCurrentThreads(Thread.getAllStackTraces(), mechanismThreadIds, ignoreCurrentThread);
+  }
+
+  @Nullable
   List<SentryThread> getCurrentThreads(final @Nullable List<Long> mechanismThreadIds) {
-    return getCurrentThreads(Thread.getAllStackTraces(), mechanismThreadIds);
+    return getCurrentThreads(Thread.getAllStackTraces(), mechanismThreadIds, false);
   }
 
   /**
@@ -68,13 +78,16 @@ final class SentryThreadFactory {
    *
    * @param threads a map with all the current threads and stacktraces
    * @param mechanismThreadIds list of threadIds that came from exception mechanism
+   * @param ignoreCurrentThread if the current thread should be ignored when marking threads as
+   *     crashed. This is the case for e.g. watchdog threads which are not the one erroring.
    * @return a list of SentryThread or null if none
    */
   @TestOnly
   @Nullable
   List<SentryThread> getCurrentThreads(
       final @NotNull Map<Thread, StackTraceElement[]> threads,
-      final @Nullable List<Long> mechanismThreadIds) {
+      final @Nullable List<Long> mechanismThreadIds,
+      final boolean ignoreCurrentThread) {
     List<SentryThread> result = null;
 
     final Thread currentThread = Thread.currentThread();
@@ -91,8 +104,10 @@ final class SentryThreadFactory {
 
         final Thread thread = item.getKey();
         final boolean crashed =
-            (thread == currentThread)
-                || (mechanismThreadIds != null && mechanismThreadIds.contains(thread.getId()));
+            (thread == currentThread && !ignoreCurrentThread)
+                || (mechanismThreadIds != null
+                    && mechanismThreadIds.contains(thread.getId())
+                    && !ignoreCurrentThread);
 
         result.add(getSentryThread(crashed, item.getValue(), item.getKey()));
       }
@@ -123,7 +138,7 @@ final class SentryThreadFactory {
     sentryThread.setCrashed(crashed);
 
     final List<SentryStackFrame> frames =
-        sentryStackTraceFactory.getStackFrames(stackFramesElements);
+        sentryStackTraceFactory.getStackFrames(stackFramesElements, false);
 
     if (options.isAttachStacktrace() && frames != null && !frames.isEmpty()) {
       final SentryStackTrace sentryStackTrace = new SentryStackTrace(frames);

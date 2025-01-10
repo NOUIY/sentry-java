@@ -7,17 +7,18 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.sentry.DiagnosticLogger
 import io.sentry.Hint
-import io.sentry.IHub
+import io.sentry.IScopes
 import io.sentry.SentryEvent
 import io.sentry.SentryLevel
 import io.sentry.SentryTracer
 import io.sentry.TransactionContext
-import io.sentry.android.core.DefaultAndroidEventProcessor.EMULATOR
-import io.sentry.android.core.DefaultAndroidEventProcessor.KERNEL_VERSION
-import io.sentry.android.core.DefaultAndroidEventProcessor.ROOTED
-import io.sentry.android.core.DefaultAndroidEventProcessor.SIDE_LOADED
+import io.sentry.TypeCheckHint.SENTRY_DART_SDK_NAME
+import io.sentry.android.core.internal.util.CpuInfoUtils
 import io.sentry.protocol.OperatingSystem
 import io.sentry.protocol.SdkVersion
+import io.sentry.protocol.SentryException
+import io.sentry.protocol.SentryStackFrame
+import io.sentry.protocol.SentryStackTrace
 import io.sentry.protocol.SentryThread
 import io.sentry.protocol.SentryTransaction
 import io.sentry.protocol.User
@@ -56,18 +57,18 @@ class DefaultAndroidEventProcessorTest {
     private class Fixture {
         val buildInfo = mock<BuildInfoProvider>()
         val options = SentryAndroidOptions().apply {
-            setDebug(true)
+            isDebug = true
             setLogger(mock())
             sdkVersion = SdkVersion("test", "1.2.3")
         }
 
-        val hub: IHub = mock<IHub>()
+        val scopes: IScopes = mock<IScopes>()
 
         lateinit var sentryTracer: SentryTracer
 
         fun getSut(context: Context): DefaultAndroidEventProcessor {
-            whenever(hub.options).thenReturn(options)
-            sentryTracer = SentryTracer(TransactionContext("", ""), hub)
+            whenever(scopes.options).thenReturn(options)
+            sentryTracer = SentryTracer(TransactionContext("", ""), scopes)
             return DefaultAndroidEventProcessor(context, buildInfo, options)
         }
     }
@@ -77,6 +78,8 @@ class DefaultAndroidEventProcessorTest {
     @BeforeTest
     fun `set up`() {
         context = ApplicationProvider.getApplicationContext()
+        AppState.getInstance().resetInstance()
+        DeviceInfoUtil.resetInstance()
     }
 
     @Test
@@ -134,18 +137,6 @@ class DefaultAndroidEventProcessorTest {
     }
 
     @Test
-    fun `when Android version is below JELLY_BEAN, does not add permissions`() {
-        whenever(fixture.buildInfo.sdkInfoVersion).thenReturn(Build.VERSION_CODES.ICE_CREAM_SANDWICH)
-        val sut = fixture.getSut(context)
-
-        assertNotNull(sut.process(SentryEvent(), Hint())) {
-            // assert adds permissions
-            val unknown = it.contexts.app!!.permissions
-            assertNull(unknown)
-        }
-    }
-
-    @Test
     fun `When Transaction and hint is not Cached, data should be applied`() {
         val sut = fixture.getSut(context)
 
@@ -161,7 +152,7 @@ class DefaultAndroidEventProcessorTest {
     }
 
     @Test
-    fun `Current should be true if it comes from main thread`() {
+    fun `Current and Main should be true if it comes from main thread`() {
         val sut = fixture.getSut(context)
 
         val sentryThread = SentryThread().apply {
@@ -174,6 +165,7 @@ class DefaultAndroidEventProcessorTest {
         assertNotNull(sut.process(event, Hint())) {
             assertNotNull(it.threads) { threads ->
                 assertTrue(threads.first().isCurrent == true)
+                assertTrue(threads.first().isMain == true)
             }
         }
     }
@@ -193,6 +185,7 @@ class DefaultAndroidEventProcessorTest {
         assertNotNull(sut.process(event, Hint())) {
             assertNotNull(it.threads) { threads ->
                 assertFalse(threads.first().isCurrent == true)
+                assertFalse(threads.first().isMain == true)
             }
         }
     }
@@ -291,16 +284,28 @@ class DefaultAndroidEventProcessorTest {
     }
 
     @Test
-    fun `Executor service should be called on ctor`() {
+    fun `when event user data does not have ip address set, sets {{auto}} as the ip address`() {
         val sut = fixture.getSut(context)
+        val event = SentryEvent().apply {
+            user = User()
+        }
+        sut.process(event, Hint())
+        assertNotNull(event.user) {
+            assertEquals("{{auto}}", it.ipAddress)
+        }
+    }
 
-        val contextData = sut.contextData.get()
-
-        assertNotNull(contextData)
-        assertNotNull(contextData[ROOTED])
-        assertNotNull(contextData[KERNEL_VERSION])
-        assertNotNull(contextData[EMULATOR])
-        assertNotNull(contextData[SIDE_LOADED])
+    @Test
+    fun `when event has ip address set, keeps original ip address`() {
+        val sut = fixture.getSut(context)
+        val event = SentryEvent()
+        event.user = User().apply {
+            ipAddress = "192.168.0.1"
+        }
+        sut.process(event, Hint())
+        assertNotNull(event.user) {
+            assertEquals("192.168.0.1", it.ipAddress)
+        }
     }
 
     @Test
@@ -318,7 +323,7 @@ class DefaultAndroidEventProcessorTest {
     @Test
     fun `Processor won't throw exception when theres a hint`() {
         val processor =
-            DefaultAndroidEventProcessor(context, fixture.buildInfo, mock(), fixture.options)
+            DefaultAndroidEventProcessor(context, fixture.buildInfo, fixture.options)
 
         val hints = HintUtils.createWithTypeCheckHint(CachedEvent())
         processor.process(SentryEvent(), hints)
@@ -488,13 +493,169 @@ class DefaultAndroidEventProcessorTest {
     }
 
     @Test
-    fun `Event sets language and locale`() {
+    fun `Event sets locale`() {
         val sut = fixture.getSut(context)
 
         assertNotNull(sut.process(SentryEvent(), Hint())) {
             val device = it.contexts.device!!
-            assertEquals("en", device.language)
             assertEquals("en_US", device.locale)
+        }
+    }
+
+    @Test
+    fun `Event sets InForeground to true if not in the background`() {
+        val sut = fixture.getSut(context)
+
+        AppState.getInstance().setInBackground(false)
+
+        assertNotNull(sut.process(SentryEvent(), Hint())) {
+            val app = it.contexts.app!!
+            assertTrue(app.inForeground!!)
+        }
+    }
+
+    @Test
+    fun `Event sets InForeground to false if in the background`() {
+        val sut = fixture.getSut(context)
+
+        AppState.getInstance().setInBackground(true)
+
+        assertNotNull(sut.process(SentryEvent(), Hint())) {
+            val app = it.contexts.app!!
+            assertFalse(app.inForeground!!)
+        }
+    }
+
+    @Test
+    fun `Event sets no device cpu info when there is none provided`() {
+        val sut = fixture.getSut(context)
+        CpuInfoUtils.getInstance().setCpuMaxFrequencies(emptyList())
+        assertNotNull(sut.process(SentryEvent(), Hint())) {
+            val device = it.contexts.device!!
+            assertNull(device.processorCount)
+            assertNull(device.processorFrequency)
+        }
+    }
+
+    @Test
+    fun `Event sets rights device cpu info when there is one provided`() {
+        val sut = fixture.getSut(context)
+        CpuInfoUtils.getInstance().setCpuMaxFrequencies(listOf(800, 900))
+
+        assertNotNull(sut.process(SentryEvent(), Hint())) {
+            val device = it.contexts.device!!
+            assertEquals(2, device.processorCount)
+            assertEquals(900.0, device.processorFrequency)
+        }
+    }
+
+    @Test
+    fun `Events from HybridSDKs don't set main thread and in foreground context`() {
+        val sut = fixture.getSut(context)
+
+        val cachedHint = CustomCachedApplyScopeDataHint()
+        val hint = HintUtils.createWithTypeCheckHint(cachedHint)
+
+        val sdkVersion = SdkVersion(SENTRY_DART_SDK_NAME, "1.0.0")
+        val event = SentryEvent().apply {
+            sdk = sdkVersion
+            threads = mutableListOf(
+                SentryThread().apply {
+                    id = 10L
+                }
+            )
+        }
+        // set by OutboxSender during event deserialization
+        HintUtils.setIsFromHybridSdk(hint, sdkVersion.name)
+
+        assertNotNull(sut.process(event, hint)) {
+            val app = it.contexts.app!!
+            assertNull(app.inForeground)
+            val thread = it.threads!!.first()
+            assertNull(thread.isMain)
+        }
+    }
+
+    @Test
+    fun `the exception list is reversed in case there's an RuntimeException`() {
+        val sut = fixture.getSut(context)
+        val event = SentryEvent().apply {
+            exceptions = listOf(
+                SentryException().apply {
+                    type = "IllegalStateException"
+                    module = "com.example"
+                    stacktrace = SentryStackTrace(
+                        listOf(
+                            SentryStackFrame().apply {
+                                function = "onCreate"
+                                module = "com.example.Application"
+                                filename = "Application.java"
+                            }
+                        )
+                    )
+                },
+                SentryException().apply {
+                    type = "RuntimeException"
+                    value = "Unable to create application com.example.Application: java.lang.IllegalStateException"
+                    module = "java.lang"
+                    stacktrace = SentryStackTrace(
+                        listOf(
+                            SentryStackFrame().apply {
+                                function = "run"
+                                module = "com.android.internal.os.RuntimeInit\$MethodAndArgsCaller"
+                                filename = "RuntimeInit.java"
+                            }
+                        )
+                    )
+                }
+            )
+        }
+        val processedEvent = sut.process(event, Hint())
+        assertNotNull(processedEvent) {
+            assertEquals(2, it.exceptions!!.size)
+            assertEquals("RuntimeException", it.exceptions!![0].type)
+            assertEquals("IllegalStateException", it.exceptions!![1].type)
+        }
+    }
+
+    @Test
+    fun `the exception list is kept as-is in case there's no RuntimeException`() {
+        val sut = fixture.getSut(context)
+        val event = SentryEvent().apply {
+            exceptions = listOf(
+                SentryException().apply {
+                    type = "IllegalStateException"
+                    module = "com.example"
+                    stacktrace = SentryStackTrace(
+                        listOf(
+                            SentryStackFrame().apply {
+                                function = "onCreate"
+                                module = "com.example.Application"
+                                filename = "Application.java"
+                            }
+                        )
+                    )
+                },
+                SentryException().apply {
+                    type = "IllegalArgumentException"
+                    module = "com.example"
+                    stacktrace = SentryStackTrace(
+                        listOf(
+                            SentryStackFrame().apply {
+                                function = "onCreate"
+                                module = "com.example.Application"
+                                filename = "Application.java"
+                            }
+                        )
+                    )
+                }
+            )
+        }
+        val processedEvent = sut.process(event, Hint())
+        assertNotNull(processedEvent) {
+            assertEquals(2, it.exceptions!!.size)
+            assertEquals("IllegalStateException", it.exceptions!![0].type)
+            assertEquals("IllegalArgumentException", it.exceptions!![1].type)
         }
     }
 }

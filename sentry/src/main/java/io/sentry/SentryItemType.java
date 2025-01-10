@@ -16,6 +16,11 @@ public enum SentryItemType implements JsonSerializable {
   Transaction("transaction"),
   Profile("profile"),
   ClientReport("client_report"),
+  ReplayEvent("replay_event"),
+  ReplayRecording("replay_recording"),
+  ReplayVideo("replay_video"),
+  CheckIn("check_in"),
+  Feedback("feedback"),
   Unknown("__unknown__"); // DataCategory.Unknown
 
   private final String itemType;
@@ -52,16 +57,16 @@ public enum SentryItemType implements JsonSerializable {
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.value(itemType);
   }
 
-  static final class Deserializer implements JsonDeserializer<SentryItemType> {
+  public static final class Deserializer implements JsonDeserializer<SentryItemType> {
 
     @Override
     public @NotNull SentryItemType deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+        @NotNull ObjectReader reader, @NotNull ILogger logger) throws Exception {
       return SentryItemType.valueOfLabel(reader.nextString().toLowerCase(Locale.ROOT));
     }
   }

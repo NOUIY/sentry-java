@@ -17,15 +17,20 @@ import io.opentelemetry.sdk.OpenTelemetrySdk
 import io.opentelemetry.sdk.trace.ReadWriteSpan
 import io.opentelemetry.sdk.trace.ReadableSpan
 import io.opentelemetry.sdk.trace.SdkTracerProvider
-import io.opentelemetry.semconv.trace.attributes.SemanticAttributes
+import io.opentelemetry.semconv.HttpAttributes
+import io.opentelemetry.semconv.UrlAttributes
 import io.sentry.Baggage
 import io.sentry.BaggageHeader
-import io.sentry.IHub
+import io.sentry.Hint
+import io.sentry.IScopes
 import io.sentry.ISpan
 import io.sentry.ITransaction
 import io.sentry.Instrumenter
+import io.sentry.SentryDate
+import io.sentry.SentryEvent
 import io.sentry.SentryOptions
 import io.sentry.SentryTraceHeader
+import io.sentry.SpanOptions
 import io.sentry.SpanStatus
 import io.sentry.TransactionContext
 import io.sentry.TransactionOptions
@@ -41,7 +46,6 @@ import org.mockito.kotlin.verifyNoInteractions
 import org.mockito.kotlin.verifyNoMoreInteractions
 import org.mockito.kotlin.whenever
 import java.net.http.HttpHeaders
-import java.util.Date
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -63,19 +67,25 @@ class SentrySpanProcessorTest {
             it.dsn = "https://key@sentry.io/proj"
             it.instrumenter = Instrumenter.OTEL
         }
-        val hub = mock<IHub>()
+        val scopes = mock<IScopes>()
         val transaction = mock<ITransaction>()
         val span = mock<ISpan>()
+        val spanContext = mock<io.sentry.SpanContext>()
         lateinit var openTelemetry: OpenTelemetry
         lateinit var tracer: Tracer
         val sentryTrace = SentryTraceHeader(SENTRY_TRACE_HEADER_STRING)
         val baggage = Baggage.fromHeader(BAGGAGE_HEADER_STRING)
 
         fun setup() {
-            whenever(hub.isEnabled).thenReturn(true)
-            whenever(hub.options).thenReturn(options)
-            whenever(hub.startTransaction(any<TransactionContext>(), any<TransactionOptions>())).thenReturn(transaction)
+            whenever(scopes.isEnabled).thenReturn(true)
+            whenever(scopes.options).thenReturn(options)
+            whenever(scopes.startTransaction(any<TransactionContext>(), any<TransactionOptions>())).thenReturn(transaction)
 
+            whenever(spanContext.operation).thenReturn("spanContextOp")
+            whenever(spanContext.parentSpanId).thenReturn(io.sentry.SpanId("cedf5b7571cb4972"))
+
+            whenever(transaction.spanContext).thenReturn(spanContext)
+            whenever(span.spanContext).thenReturn(spanContext)
             whenever(span.toSentryTrace()).thenReturn(sentryTrace)
             whenever(transaction.toSentryTrace()).thenReturn(sentryTrace)
 
@@ -83,10 +93,10 @@ class SentrySpanProcessorTest {
             whenever(span.toBaggageHeader(any())).thenReturn(baggageHeader)
             whenever(transaction.toBaggageHeader(any())).thenReturn(baggageHeader)
 
-            whenever(transaction.startChild(any<String>(), anyOrNull<String>(), anyOrNull<Date>(), eq(Instrumenter.OTEL))).thenReturn(span)
+            whenever(transaction.startChild(any<String>(), anyOrNull<String>(), anyOrNull<SentryDate>(), eq(Instrumenter.OTEL), any<SpanOptions>())).thenReturn(span)
 
             val sdkTracerProvider = SdkTracerProvider.builder()
-                .addSpanProcessor(SentrySpanProcessor(hub))
+                .addSpanProcessor(SentrySpanProcessor(scopes))
                 .build()
 
             openTelemetry = OpenTelemetrySdk.builder()
@@ -116,7 +126,7 @@ class SentrySpanProcessorTest {
     fun `ignores sentry client request`() {
         fixture.setup()
         givenSpanBuilder(SpanKind.CLIENT)
-            .setAttribute(SemanticAttributes.HTTP_URL, "https://key@sentry.io/proj/some-api")
+            .setAttribute(UrlAttributes.URL_FULL, "https://key@sentry.io/proj/some-api")
             .startSpan()
 
         thenNoTransactionIsStarted()
@@ -126,7 +136,7 @@ class SentrySpanProcessorTest {
     fun `ignores sentry internal request`() {
         fixture.setup()
         givenSpanBuilder(SpanKind.CLIENT)
-            .setAttribute(SemanticAttributes.HTTP_URL, "https://key@sentry.io/proj/some-api")
+            .setAttribute(UrlAttributes.URL_FULL, "https://key@sentry.io/proj/some-api")
             .startSpan()
 
         thenNoTransactionIsStarted()
@@ -134,30 +144,32 @@ class SentrySpanProcessorTest {
 
     @Test
     fun `does nothing on start if Sentry has not been initialized`() {
-        val hub = mock<IHub>()
+        fixture.setup()
         val context = mock<Context>()
         val span = mock<ReadWriteSpan>()
 
-        whenever(hub.isEnabled).thenReturn(false)
+        whenever(fixture.scopes.isEnabled).thenReturn(false)
 
-        SentrySpanProcessor(hub).onStart(context, span)
+        SentrySpanProcessor(fixture.scopes).onStart(context, span)
 
-        verify(hub).isEnabled
-        verifyNoMoreInteractions(hub)
+        verify(fixture.scopes).isEnabled
+        verify(fixture.scopes).options
+        verifyNoMoreInteractions(fixture.scopes)
         verifyNoInteractions(context, span)
     }
 
     @Test
     fun `does nothing on end if Sentry has not been initialized`() {
-        val hub = mock<IHub>()
+        fixture.setup()
         val span = mock<ReadableSpan>()
 
-        whenever(hub.isEnabled).thenReturn(false)
+        whenever(fixture.scopes.isEnabled).thenReturn(false)
 
-        SentrySpanProcessor(hub).onEnd(span)
+        SentrySpanProcessor(fixture.scopes).onEnd(span)
 
-        verify(hub).isEnabled
-        verifyNoMoreInteractions(hub)
+        verify(fixture.scopes).isEnabled
+        verify(fixture.scopes).options
+        verifyNoMoreInteractions(fixture.scopes)
         verifyNoInteractions(span)
     }
 
@@ -168,7 +180,7 @@ class SentrySpanProcessorTest {
         val mockSpanContext = mock<SpanContext>()
         whenever(mockSpanContext.spanId).thenReturn(SpanId.getInvalid())
         whenever(mockSpan.spanContext).thenReturn(mockSpanContext)
-        SentrySpanProcessor(fixture.hub).onStart(Context.current(), mockSpan)
+        SentrySpanProcessor(fixture.scopes).onStart(Context.current(), mockSpan)
         thenNoTransactionIsStarted()
     }
 
@@ -180,7 +192,7 @@ class SentrySpanProcessorTest {
         whenever(mockSpanContext.spanId).thenReturn(SpanId.fromBytes("seed".toByteArray()))
         whenever(mockSpanContext.traceId).thenReturn(TraceId.getInvalid())
         whenever(mockSpan.spanContext).thenReturn(mockSpanContext)
-        SentrySpanProcessor(fixture.hub).onStart(Context.current(), mockSpan)
+        SentrySpanProcessor(fixture.scopes).onStart(Context.current(), mockSpan)
         thenNoTransactionIsStarted()
     }
 
@@ -293,8 +305,8 @@ class SentrySpanProcessorTest {
         thenChildSpanIsStarted()
 
         otelChildSpan.setStatus(StatusCode.ERROR)
-        otelChildSpan.setAttribute(SemanticAttributes.HTTP_URL, "http://github.com/getsentry/sentry-java")
-        otelChildSpan.setAttribute(SemanticAttributes.HTTP_STATUS_CODE, 404L)
+        otelChildSpan.setAttribute(UrlAttributes.URL_FULL, "http://github.com/getsentry/sentry-java")
+        otelChildSpan.setAttribute(HttpAttributes.HTTP_RESPONSE_STATUS_CODE, 404L)
 
         otelChildSpan.end()
         thenChildSpanIsFinished(SpanStatus.NOT_FOUND)
@@ -320,6 +332,40 @@ class SentrySpanProcessorTest {
 
         otelSpan.end()
         thenTransactionIsFinished()
+    }
+
+    @Test
+    fun `links error to OTEL transaction`() {
+        fixture.setup()
+        val extractedContext = whenExtractingHeaders()
+
+        extractedContext.makeCurrent().use { _ ->
+            val otelSpan = givenSpanBuilder().startSpan()
+            thenTransactionIsStarted(otelSpan, isContinued = true)
+
+            otelSpan.makeCurrent().use { _ ->
+                val processedEvent = OpenTelemetryLinkErrorEventProcessor(fixture.scopes).process(SentryEvent(), Hint())
+                val traceContext = processedEvent!!.contexts.trace!!
+
+                assertEquals("2722d9f6ec019ade60c776169d9a8904", traceContext.traceId.toString())
+                assertEquals(otelSpan.spanContext.spanId, traceContext.spanId.toString())
+                assertEquals("cedf5b7571cb4972", traceContext.parentSpanId.toString())
+                assertEquals("spanContextOp", traceContext.operation)
+            }
+
+            otelSpan.end()
+            thenTransactionIsFinished()
+        }
+    }
+
+    @Test
+    fun `does not link error to OTEL transaction if instrumenter does not match`() {
+        fixture.options.instrumenter = Instrumenter.SENTRY
+        fixture.setup()
+
+        val processedEvent = OpenTelemetryLinkErrorEventProcessor(fixture.scopes).process(SentryEvent(), Hint())
+
+        thenNoTraceContextHasBeenAddedToEvent(processedEvent)
     }
 
     private fun givenSpanBuilder(spanKind: SpanKind = SpanKind.SERVER, parentSpan: Span? = null): SpanBuilder {
@@ -349,7 +395,7 @@ class SentrySpanProcessorTest {
 
     private fun thenTransactionIsStarted(otelSpan: Span, isContinued: Boolean = false, continuesWithFilledBaggage: Boolean = true) {
         if (isContinued) {
-            verify(fixture.hub).startTransaction(
+            verify(fixture.scopes).startTransaction(
                 check<TransactionContext> {
                     assertEquals("testspan", it.name)
                     assertEquals(TransactionNameSource.CUSTOM, it.transactionNameSource)
@@ -379,7 +425,7 @@ class SentrySpanProcessorTest {
                 }
             )
         } else {
-            verify(fixture.hub).startTransaction(
+            verify(fixture.scopes).startTransaction(
                 check<TransactionContext> {
                     assertEquals("testspan", it.name)
                     assertEquals(TransactionNameSource.CUSTOM, it.transactionNameSource)
@@ -407,7 +453,7 @@ class SentrySpanProcessorTest {
     }
 
     private fun thenNoTransactionIsStarted() {
-        verify(fixture.hub, never()).startTransaction(
+        verify(fixture.scopes, never()).startTransaction(
             any<TransactionContext>(),
             any<TransactionOptions>()
         )
@@ -417,18 +463,24 @@ class SentrySpanProcessorTest {
         verify(fixture.transaction).startChild(
             eq("childspan"),
             eq("childspan"),
-            any<Date>(),
-            eq(Instrumenter.OTEL)
+            any<SentryDate>(),
+            eq(Instrumenter.OTEL),
+            any<SpanOptions>()
         )
     }
 
     private fun thenChildSpanIsFinished(status: SpanStatus = SpanStatus.OK) {
-        verify(fixture.span).finish(eq(status), any<Date>())
+        verify(fixture.span).finish(eq(status), any<SentryDate>())
     }
 
     private fun thenTransactionIsFinished() {
         verify(fixture.transaction).setContext(eq("otel"), any())
-        verify(fixture.transaction).finish(eq(SpanStatus.OK), any<Date>())
+        verify(fixture.transaction).finish(eq(SpanStatus.OK), any<SentryDate>())
+    }
+
+    private fun thenNoTraceContextHasBeenAddedToEvent(event: SentryEvent?) {
+        assertNotNull(event)
+        assertNull(event.contexts.trace)
     }
 }
 

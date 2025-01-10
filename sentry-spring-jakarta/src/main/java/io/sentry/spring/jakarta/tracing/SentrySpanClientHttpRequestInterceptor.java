@@ -8,13 +8,17 @@ import com.jakewharton.nopen.annotation.Open;
 import io.sentry.BaggageHeader;
 import io.sentry.Breadcrumb;
 import io.sentry.Hint;
-import io.sentry.IHub;
+import io.sentry.IScopes;
 import io.sentry.ISpan;
-import io.sentry.SentryTraceHeader;
+import io.sentry.SpanDataConvention;
+import io.sentry.SpanOptions;
 import io.sentry.SpanStatus;
 import io.sentry.util.Objects;
-import io.sentry.util.PropagationTargetsUtils;
+import io.sentry.util.SpanUtils;
+import io.sentry.util.TracingUtils;
+import io.sentry.util.UrlUtils;
 import java.io.IOException;
+import java.util.Locale;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.springframework.http.HttpRequest;
@@ -24,10 +28,19 @@ import org.springframework.http.client.ClientHttpResponse;
 
 @Open
 public class SentrySpanClientHttpRequestInterceptor implements ClientHttpRequestInterceptor {
-  private final @NotNull IHub hub;
+  private static final String TRACE_ORIGIN_REST_TEMPLATE = "auto.http.spring_jakarta.resttemplate";
+  private static final String TRACE_ORIGIN_REST_CLIENT = "auto.http.spring_jakarta.restclient";
+  private final @NotNull IScopes scopes;
+  private final @NotNull String traceOrigin;
 
-  public SentrySpanClientHttpRequestInterceptor(final @NotNull IHub hub) {
-    this.hub = Objects.requireNonNull(hub, "hub is required");
+  public SentrySpanClientHttpRequestInterceptor(final @NotNull IScopes scopes) {
+    this(scopes, true);
+  }
+
+  public SentrySpanClientHttpRequestInterceptor(
+      final @NotNull IScopes scopes, final @NotNull boolean isRestTemplate) {
+    this.scopes = Objects.requireNonNull(scopes, "Scopes are required");
+    this.traceOrigin = isRestTemplate ? TRACE_ORIGIN_REST_TEMPLATE : TRACE_ORIGIN_REST_CLIENT;
   }
 
   @Override
@@ -39,31 +52,27 @@ public class SentrySpanClientHttpRequestInterceptor implements ClientHttpRequest
     Integer responseStatusCode = null;
     ClientHttpResponse response = null;
     try {
-      final ISpan activeSpan = hub.getSpan();
+      final ISpan activeSpan = scopes.getSpan();
       if (activeSpan == null) {
+        maybeAddTracingHeaders(request, null);
         return execution.execute(request, body);
       }
-
-      final ISpan span = activeSpan.startChild("http.client");
+      final @NotNull SpanOptions spanOptions = new SpanOptions();
+      spanOptions.setOrigin(traceOrigin);
+      final ISpan span = activeSpan.startChild("http.client", null, spanOptions);
       final String methodName =
           request.getMethod() != null ? request.getMethod().name() : "unknown";
-      span.setDescription(methodName + " " + request.getURI());
+      final @NotNull UrlUtils.UrlDetails urlDetails = UrlUtils.parse(request.getURI().toString());
+      span.setDescription(methodName + " " + urlDetails.getUrlOrFallback());
+      span.setData(SpanDataConvention.HTTP_METHOD_KEY, methodName.toUpperCase(Locale.ROOT));
+      urlDetails.applyToSpan(span);
 
-      if (!span.isNoOp() && PropagationTargetsUtils.contain(
-          hub.getOptions().getTracePropagationTargets(), request.getURI())) {
-        final SentryTraceHeader sentryTraceHeader = span.toSentryTrace();
-        request.getHeaders().add(sentryTraceHeader.getName(), sentryTraceHeader.getValue());
-        @Nullable
-        BaggageHeader baggage =
-            span.toBaggageHeader(request.getHeaders().get(BaggageHeader.BAGGAGE_HEADER));
-        if (baggage != null) {
-          request.getHeaders().set(baggage.getName(), baggage.getValue());
-        }
-      }
+      maybeAddTracingHeaders(request, span);
 
       try {
         response = execution.execute(request, body);
         // handles both success and error responses
+        span.setData(SpanDataConvention.HTTP_STATUS_CODE_KEY, response.getStatusCode().value());
         span.setStatus(SpanStatus.fromHttpStatusCode(response.getStatusCode().value()));
         responseStatusCode = response.getStatusCode().value();
         return response;
@@ -78,6 +87,37 @@ public class SentrySpanClientHttpRequestInterceptor implements ClientHttpRequest
     } finally {
       addBreadcrumb(request, body, responseStatusCode, response);
     }
+  }
+
+  private void maybeAddTracingHeaders(
+      final @NotNull HttpRequest request, final @Nullable ISpan span) {
+    if (isIgnored()) {
+      return;
+    }
+
+    final @Nullable TracingUtils.TracingHeaders tracingHeaders =
+        TracingUtils.traceIfAllowed(
+            scopes,
+            request.getURI().toString(),
+            request.getHeaders().get(BaggageHeader.BAGGAGE_HEADER),
+            span);
+
+    if (tracingHeaders != null) {
+      request
+          .getHeaders()
+          .add(
+              tracingHeaders.getSentryTraceHeader().getName(),
+              tracingHeaders.getSentryTraceHeader().getValue());
+
+      final @Nullable BaggageHeader baggageHeader = tracingHeaders.getBaggageHeader();
+      if (baggageHeader != null) {
+        request.getHeaders().set(baggageHeader.getName(), baggageHeader.getValue());
+      }
+    }
+  }
+
+  private boolean isIgnored() {
+    return SpanUtils.isIgnored(scopes.getOptions().getIgnoredSpanOrigins(), traceOrigin);
   }
 
   private void addBreadcrumb(
@@ -98,6 +138,6 @@ public class SentrySpanClientHttpRequestInterceptor implements ClientHttpRequest
       hint.set(SPRING_REQUEST_INTERCEPTOR_RESPONSE, response);
     }
 
-    hub.addBreadcrumb(breadcrumb, hint);
+    scopes.addBreadcrumb(breadcrumb, hint);
   }
 }

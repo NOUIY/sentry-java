@@ -1,5 +1,28 @@
-// https://github.com/SalomonBrys/ANR-WatchDog/blob/1969075f75f5980e9000eaffbaa13b0daf282dcb/anr-watchdog/src/main/java/com/github/anrwatchdog/ANRWatchDog.java
-// Based on the class above. The API unnecessary here was removed.
+/*
+ * Adapted from https://github.com/SalomonBrys/ANR-WatchDog/blob/1969075f75f5980e9000eaffbaa13b0daf282dcb/anr-watchdog/src/main/java/com/github/anrwatchdog/ANRWatchDog.java
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2016 Salomon BRYS
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
 package io.sentry.android.core;
 
 import static android.app.ActivityManager.ProcessErrorStateInfo.NOT_RESPONDING;
@@ -7,11 +30,12 @@ import static android.app.ActivityManager.ProcessErrorStateInfo.NOT_RESPONDING;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.os.Debug;
+import android.os.SystemClock;
 import io.sentry.ILogger;
 import io.sentry.SentryLevel;
+import io.sentry.transport.ICurrentDateProvider;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.TestOnly;
 
@@ -22,19 +46,20 @@ final class ANRWatchDog extends Thread {
   private final boolean reportInDebug;
   private final ANRListener anrListener;
   private final MainLooperHandler uiHandler;
+  private final ICurrentDateProvider timeProvider;
+  /** the interval in which we check if there's an ANR, in ms */
+  private long pollingIntervalMs;
+
   private final long timeoutIntervalMillis;
   private final @NotNull ILogger logger;
-  private final AtomicLong tick = new AtomicLong(0);
+
+  private volatile long lastKnownActiveUiTimestampMs = 0;
   private final AtomicBoolean reported = new AtomicBoolean(false);
 
   private final @NotNull Context context;
 
   @SuppressWarnings("UnnecessaryLambda")
-  private final Runnable ticker =
-      () -> {
-        tick.set(0);
-        reported.set(false);
-      };
+  private final Runnable ticker;
 
   ANRWatchDog(
       long timeoutIntervalMillis,
@@ -42,40 +67,64 @@ final class ANRWatchDog extends Thread {
       @NotNull ANRListener listener,
       @NotNull ILogger logger,
       final @NotNull Context context) {
-    this(timeoutIntervalMillis, reportInDebug, listener, logger, new MainLooperHandler(), context);
+    // avoid method refs on Android due to some issues with older AGP setups
+    // noinspection Convert2MethodRef
+    this(
+        () -> SystemClock.uptimeMillis(),
+        timeoutIntervalMillis,
+        500,
+        reportInDebug,
+        listener,
+        logger,
+        new MainLooperHandler(),
+        context);
   }
 
   @TestOnly
   ANRWatchDog(
+      @NotNull final ICurrentDateProvider timeProvider,
       long timeoutIntervalMillis,
+      long pollingIntervalMillis,
       boolean reportInDebug,
       @NotNull ANRListener listener,
       @NotNull ILogger logger,
       @NotNull MainLooperHandler uiHandler,
       final @NotNull Context context) {
-    super();
+
+    super("|ANR-WatchDog|");
+
+    this.timeProvider = timeProvider;
+    this.timeoutIntervalMillis = timeoutIntervalMillis;
+    this.pollingIntervalMs = pollingIntervalMillis;
     this.reportInDebug = reportInDebug;
     this.anrListener = listener;
-    this.timeoutIntervalMillis = timeoutIntervalMillis;
     this.logger = logger;
     this.uiHandler = uiHandler;
     this.context = context;
+    this.ticker =
+        () -> {
+          lastKnownActiveUiTimestampMs = timeProvider.getCurrentTimeMillis();
+          reported.set(false);
+        };
+
+    if (timeoutIntervalMillis < (pollingIntervalMs * 2)) {
+      throw new IllegalArgumentException(
+          String.format(
+              "ANRWatchDog: timeoutIntervalMillis has to be at least %d ms",
+              pollingIntervalMs * 2));
+    }
   }
 
   @Override
   public void run() {
-    setName("|ANR-WatchDog|");
+    // right when the watchdog gets started, let's assume there's no ANR
+    ticker.run();
 
-    long interval = timeoutIntervalMillis;
     while (!isInterrupted()) {
-      boolean needPost = tick.get() == 0;
-      tick.addAndGet(interval);
-      if (needPost) {
-        uiHandler.post(ticker);
-      }
+      uiHandler.post(ticker);
 
       try {
-        Thread.sleep(interval);
+        Thread.sleep(pollingIntervalMs);
       } catch (InterruptedException e) {
         try {
           Thread.currentThread().interrupt();
@@ -90,8 +139,11 @@ final class ANRWatchDog extends Thread {
         return;
       }
 
+      final long unresponsiveDurationMs =
+          timeProvider.getCurrentTimeMillis() - lastKnownActiveUiTimestampMs;
+
       // If the main thread has not handled ticker, it is blocked. ANR.
-      if (tick.get() != 0 && !reported.get()) {
+      if (unresponsiveDurationMs > timeoutIntervalMillis) {
         if (!reportInDebug && (Debug.isDebuggerConnected() || Debug.waitingForDebugger())) {
           logger.log(
               SentryLevel.DEBUG,
@@ -100,48 +152,44 @@ final class ANRWatchDog extends Thread {
           continue;
         }
 
-        // we only raise an ANR event if the process is in ANR state.
-        // if ActivityManager is not available, we'll still be able to send ANRs
-        final ActivityManager am =
-            (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        if (isProcessNotResponding() && reported.compareAndSet(false, true)) {
+          final String message =
+              "Application Not Responding for at least " + timeoutIntervalMillis + " ms.";
 
-        if (am != null) {
-          List<ActivityManager.ProcessErrorStateInfo> processesInErrorState = null;
-          try {
-            // It can throw RuntimeException or OutOfMemoryError
-            processesInErrorState = am.getProcessesInErrorState();
-          } catch (Throwable e) {
-            logger.log(
-                SentryLevel.ERROR, "Error getting ActivityManager#getProcessesInErrorState.", e);
-          }
-          // if list is null, there's no process in ANR state.
-          if (processesInErrorState == null) {
-            continue;
-          }
-          boolean isAnr = false;
-          for (ActivityManager.ProcessErrorStateInfo item : processesInErrorState) {
-            if (item.condition == NOT_RESPONDING) {
-              isAnr = true;
-              break;
-            }
-          }
-          if (!isAnr) {
-            continue;
-          }
+          final ApplicationNotResponding error =
+              new ApplicationNotResponding(message, uiHandler.getThread());
+          anrListener.onAppNotResponding(error);
         }
-
-        logger.log(SentryLevel.INFO, "Raising ANR");
-        final String message =
-            "Application Not Responding for at least " + timeoutIntervalMillis + " ms.";
-
-        final ApplicationNotResponding error =
-            new ApplicationNotResponding(message, uiHandler.getThread());
-        anrListener.onAppNotResponding(error);
-        interval = timeoutIntervalMillis;
-
-        reported.set(true);
       }
     }
+  }
+
+  private boolean isProcessNotResponding() {
+    // we only raise an ANR event if the process is in ANR state.
+    // if ActivityManager is not available, we'll still be able to send ANRs
+    final ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+
+    if (am != null) {
+      List<ActivityManager.ProcessErrorStateInfo> processesInErrorState = null;
+      try {
+        // It can throw RuntimeException or OutOfMemoryError
+        processesInErrorState = am.getProcessesInErrorState();
+      } catch (Throwable e) {
+        logger.log(SentryLevel.ERROR, "Error getting ActivityManager#getProcessesInErrorState.", e);
+      }
+      // if list is null, there's no process in ANR state.
+      if (processesInErrorState != null) {
+        for (ActivityManager.ProcessErrorStateInfo item : processesInErrorState) {
+          if (item.condition == NOT_RESPONDING) {
+            return true;
+          }
+        }
+      }
+      // when list is empty, or there's no element NOT_RESPONDING, we can assume the app is not
+      // blocked
+      return false;
+    }
+    return true;
   }
 
   public interface ANRListener {

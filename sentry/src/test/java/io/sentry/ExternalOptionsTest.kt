@@ -209,6 +209,125 @@ class ExternalOptionsTest {
         }
     }
 
+    @Test
+    fun `creates options with single bundle ID using external properties`() {
+        withPropertiesFile("bundle-ids=12ea7a02-46ac-44c0-a5bb-6d1fd9586411") { options ->
+            assertTrue(options.bundleIds.containsAll(listOf("12ea7a02-46ac-44c0-a5bb-6d1fd9586411")))
+        }
+    }
+
+    @Test
+    fun `creates options with multiple bundle IDs using external properties`() {
+        withPropertiesFile("bundle-ids=12ea7a02-46ac-44c0-a5bb-6d1fd9586411,faa3ab42-b1bd-4659-af8e-1682324aa744") { options ->
+            assertTrue(options.bundleIds.containsAll(listOf("12ea7a02-46ac-44c0-a5bb-6d1fd9586411", "faa3ab42-b1bd-4659-af8e-1682324aa744")))
+        }
+    }
+
+    @Test
+    fun `creates options with empty bundle IDs using external properties`() {
+        withPropertiesFile("bundle-ids=") { options ->
+            assertTrue(options.bundleIds.size == 1)
+            // trimming is tested in SentryOptionsTest so even though there's an empty string here
+            // it will be filtered when being merged with SentryOptions
+            assertTrue(options.bundleIds.containsAll(listOf("")))
+        }
+    }
+
+    @Test
+    fun `creates options with missing bundle IDs using external properties`() {
+        withPropertiesFile("") { options ->
+            assertTrue(options.bundleIds.isEmpty())
+        }
+    }
+
+    @Test
+    fun `creates options with enabled set to true`() {
+        withPropertiesFile("enabled=true") { options ->
+            assertTrue(options.isEnabled() == true)
+        }
+    }
+
+    @Test
+    fun `creates options with sendModules set to false`() {
+        withPropertiesFile("send-modules=false") { options ->
+            assertTrue(options.isSendModules == false)
+        }
+    }
+
+    @Test
+    fun `creates options with ignoredCheckIns`() {
+        withPropertiesFile("ignored-checkins=slugA,slug2") { options ->
+            assertTrue(options.ignoredCheckIns!!.containsAll(listOf("slugA", "slug2")))
+        }
+    }
+
+    @Test
+    fun `creates options with ignoredTransactions`() {
+        withPropertiesFile("ignored-transactions=transactionName1,transactionName2") { options ->
+            assertTrue(options.ignoredTransactions!!.containsAll(listOf("transactionName1", "transactionName2")))
+        }
+    }
+
+    @Test
+    fun `creates options with enableBackpressureHandling set to false`() {
+        withPropertiesFile("enable-backpressure-handling=false") { options ->
+            assertTrue(options.isEnableBackpressureHandling == false)
+        }
+    }
+
+    @Test
+    fun `creates options with cron defaults`() {
+        withPropertiesFile(listOf("cron.default-checkin-margin=1", "cron.default-max-runtime=30", "cron.default-timezone=America/New_York", "cron.default-failure-issue-threshold=40", "cron.default-recovery-threshold=50")) { options ->
+            assertEquals(1L, options.cron?.defaultCheckinMargin)
+            assertEquals(30L, options.cron?.defaultMaxRuntime)
+            assertEquals("America/New_York", options.cron?.defaultTimezone)
+            assertEquals(40L, options.cron?.defaultFailureIssueThreshold)
+            assertEquals(50L, options.cron?.defaultRecoveryThreshold)
+        }
+    }
+
+    @Test
+    fun `creates options with sendDefaultPii set to true`() {
+        withPropertiesFile("send-default-pii=true") { options ->
+            assertTrue(options.isSendDefaultPii == true)
+        }
+    }
+
+    @Test
+    fun `creates options with forceInit set to true`() {
+        withPropertiesFile("force-init=true") { options ->
+            assertTrue(options.isForceInit == true)
+        }
+    }
+
+    @Test
+    fun `creates options with enableSpotlight set to true`() {
+        withPropertiesFile("enable-spotlight=true") { options ->
+            assertTrue(options.isEnableSpotlight == true)
+        }
+    }
+
+    @Test
+    fun `creates options with spotlightConnectionUrl set`() {
+        withPropertiesFile("spotlight-connection-url=http://local.sentry.io:1234") { options ->
+            assertEquals("http://local.sentry.io:1234", options.spotlightConnectionUrl)
+        }
+    }
+
+    @Test
+    fun `creates options with globalHubMode set to true`() {
+        withPropertiesFile("global-hub-mode=true") { options ->
+            assertTrue(options.isGlobalHubMode == true)
+        }
+    }
+
+    @Test
+    fun `creates options with globalHubMode set to false`() {
+        withPropertiesFile("global-hub-mode=false") { options ->
+            assertTrue(options.isGlobalHubMode == false)
+        }
+    }
+
     private fun withPropertiesFile(textLines: List<String> = emptyList(), logger: ILogger = mock(), fn: (ExternalOptions) -> Unit) {
         // create a sentry.properties file in temporary folder
         val temporaryFolder = TemporaryFolder()

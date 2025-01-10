@@ -1,7 +1,5 @@
-import io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension
 import net.ltgt.gradle.errorprone.errorprone
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
-import org.springframework.boot.gradle.plugin.SpringBootPlugin
 
 plugins {
     `java-library`
@@ -9,14 +7,7 @@ plugins {
     jacoco
     id(Config.QualityPlugins.errorProne)
     id(Config.QualityPlugins.gradleVersions)
-    id(Config.BuildPlugins.springBoot) version Config.springBootVersion apply false
-    id(Config.BuildPlugins.springDependencyManagement) version Config.BuildPlugins.springDependencyManagementVersion
-}
-
-the<DependencyManagementExtension>().apply {
-    imports {
-        mavenBom(SpringBootPlugin.BOM_COORDINATES)
-    }
+    id(Config.BuildPlugins.buildConfig) version Config.BuildPlugins.buildConfigVersion
 }
 
 configure<JavaPluginExtension> {
@@ -77,23 +68,17 @@ tasks {
         dependsOn(jacocoTestReport)
     }
 }
-repositories {
-    mavenCentral()
-}
-val compileKotlin: KotlinCompile by tasks
-compileKotlin.kotlinOptions {
-    jvmTarget = JavaVersion.VERSION_1_8.toString()
-    languageVersion = Config.kotlinCompatibleLanguageVersion
-}
-val compileTestKotlin: KotlinCompile by tasks
-compileTestKotlin.kotlinOptions {
-    jvmTarget = JavaVersion.VERSION_1_8.toString()
-    languageVersion = Config.kotlinCompatibleLanguageVersion
-}
 
 tasks.withType<JavaCompile>().configureEach {
     options.errorprone {
         check("NullAway", net.ltgt.gradle.errorprone.CheckSeverity.ERROR)
         option("NullAway:AnnotatedPackages", "io.sentry")
     }
+}
+
+buildConfig {
+    useJavaOutput()
+    packageName("io.sentry.servlet")
+    buildConfigField("String", "SENTRY_SERVLET_SDK_NAME", "\"${Config.Sentry.SENTRY_SERVLET_SDK_NAME}\"")
+    buildConfigField("String", "VERSION_NAME", "\"${project.version}\"")
 }

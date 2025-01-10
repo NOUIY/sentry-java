@@ -6,7 +6,7 @@ plugins {
     kotlin("multiplatform")
     id("com.android.library")
     id("org.jetbrains.compose")
-    jacoco
+    id(Config.QualityPlugins.kover)
     id(Config.QualityPlugins.gradleVersions)
     id(Config.QualityPlugins.detektPlugin)
     id(Config.BuildPlugins.dokkaPluginAlias)
@@ -18,8 +18,11 @@ kotlin {
 
     android {
         publishLibraryVariants("release")
+        compilations.all {
+            kotlinOptions.jvmTarget = JavaVersion.VERSION_1_8.toString()
+        }
     }
-    jvm() {
+    jvm("desktop") {
         compilations.all {
             kotlinOptions.jvmTarget = JavaVersion.VERSION_1_8.toString()
         }
@@ -36,36 +39,27 @@ kotlin {
     sourceSets {
         val commonMain by getting {
             dependencies {
-                api(compose.runtime)
-                api(compose.ui)
+                compileOnly(compose.runtime)
+                compileOnly(compose.ui)
 
-                implementation(Config.Libs.kotlinStdLib)
+                compileOnly(projects.sentryComposeHelper)
             }
         }
-
-        val jvmMain by getting {
+        val androidMain by getting {
             dependencies {
                 api(projects.sentry)
-                implementation(Config.Libs.kotlinStdLib)
-                api(projects.sentryComposeHelper)
-            }
-        }
-
-        val androidMain by getting {
-            dependsOn(jvmMain)
-
-            dependencies {
                 api(projects.sentryAndroidNavigation)
 
-                api(Config.Libs.composeNavigation)
+                compileOnly(Config.Libs.composeNavigation)
                 implementation(Config.Libs.lifecycleCommonJava8)
             }
         }
-        val androidTest by getting {
+        val androidUnitTest by getting {
             dependencies {
                 implementation(Config.TestLibs.kotlinTestJunit)
                 implementation(Config.TestLibs.mockitoKotlin)
                 implementation(Config.TestLibs.mockitoInline)
+                implementation(Config.Libs.composeNavigation)
             }
         }
     }
@@ -77,7 +71,7 @@ android {
 
     defaultConfig {
         targetSdk = Config.Android.targetSdkVersion
-        minSdk = Config.Android.minSdkVersionCompose
+        minSdk = Config.Android.minSdkVersion
 
         // for AGP 4.1
         buildConfigField("String", "VERSION_NAME", "\"${project.version}\"")
@@ -114,12 +108,6 @@ android {
         if (Config.Android.shouldSkipDebugVariant(buildType.name)) {
             ignore = true
         }
-    }
-}
-
-tasks.withType<Test> {
-    configure<JacocoTaskExtension> {
-        isIncludeNoLocationClasses = false
     }
 }
 

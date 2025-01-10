@@ -5,9 +5,11 @@ import io.sentry.hints.Retryable
 import io.sentry.util.HintUtils
 import io.sentry.util.noFlushTimeout
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.verifyNoMoreInteractions
 import org.mockito.kotlin.whenever
@@ -21,7 +23,7 @@ import kotlin.test.assertFalse
 
 class EnvelopeSenderTest {
     private class Fixture {
-        var hub: IHub? = mock()
+        var scopes: IScopes? = mock()
         var logger: ILogger? = mock()
         var serializer: ISerializer? = mock()
         var options = SentryOptions().noFlushTimeout()
@@ -32,7 +34,13 @@ class EnvelopeSenderTest {
         }
 
         fun getSut(): EnvelopeSender {
-            return EnvelopeSender(hub!!, serializer!!, logger!!, options.flushTimeoutMillis)
+            return EnvelopeSender(
+                scopes!!,
+                serializer!!,
+                logger!!,
+                options.flushTimeoutMillis,
+                options.maxQueueSize
+            )
         }
     }
 
@@ -54,7 +62,7 @@ class EnvelopeSenderTest {
         val sut = fixture.getSut()
         sut.processDirectory(File("i don't exist"))
         verify(fixture.logger)!!.log(eq(SentryLevel.WARNING), eq("Directory '%s' doesn't exist. No cached events to send."), any<Any>())
-        verifyNoMoreInteractions(fixture.hub)
+        verifyNoMoreInteractions(fixture.scopes)
     }
 
     @Test
@@ -64,7 +72,7 @@ class EnvelopeSenderTest {
         testFile.deleteOnExit()
         sut.processDirectory(testFile)
         verify(fixture.logger)!!.log(eq(SentryLevel.ERROR), eq("Cache dir %s is not a directory."), any<Any>())
-        verifyNoMoreInteractions(fixture.hub)
+        verifyNoMoreInteractions(fixture.scopes)
     }
 
     @Test
@@ -74,11 +82,11 @@ class EnvelopeSenderTest {
         sut.processDirectory(File(tempDirectory.toUri()))
         testFile.deleteOnExit()
         verify(fixture.logger)!!.log(eq(SentryLevel.DEBUG), eq("File '%s' doesn't match extension expected."), any<Any>())
-        verifyNoMoreInteractions(fixture.hub)
+        verify(fixture.scopes, never())!!.captureEnvelope(any(), anyOrNull())
     }
 
     @Test
-    fun `when directory has event files, processDirectory captures with hub`() {
+    fun `when directory has event files, processDirectory captures with scopes`() {
         val event = SentryEvent()
         val envelope = SentryEnvelope.from(fixture.serializer!!, event, null)
         whenever(fixture.serializer!!.deserializeEnvelope(any())).thenReturn(envelope)
@@ -86,7 +94,7 @@ class EnvelopeSenderTest {
         val testFile = File(Files.createTempFile(tempDirectory, "send-cached-event-test", EnvelopeCache.SUFFIX_ENVELOPE_FILE).toUri())
         testFile.deleteOnExit()
         sut.processDirectory(File(tempDirectory.toUri()))
-        verify(fixture.hub)!!.captureEnvelope(eq(envelope), any())
+        verify(fixture.scopes)!!.captureEnvelope(eq(envelope), any())
     }
 
     @Test
@@ -100,12 +108,12 @@ class EnvelopeSenderTest {
         val hints = HintUtils.createWithTypeCheckHint(mock<Retryable>())
         sut.processFile(testFile, hints)
         verify(fixture.logger)!!.log(eq(SentryLevel.ERROR), eq(expected), eq("Failed to capture cached envelope %s"), eq(testFile.absolutePath))
-        verifyNoMoreInteractions(fixture.hub)
+        verifyNoMoreInteractions(fixture.scopes)
         assertFalse(testFile.exists())
     }
 
     @Test
-    fun `when hub throws, file gets deleted`() {
+    fun `when scopes throws, file gets deleted`() {
         val expected = RuntimeException()
         whenever(fixture.serializer!!.deserializeEnvelope(any())).doThrow(expected)
         val sut = fixture.getSut()
@@ -113,6 +121,6 @@ class EnvelopeSenderTest {
         testFile.deleteOnExit()
         sut.processFile(testFile, Hint())
         verify(fixture.logger)!!.log(eq(SentryLevel.ERROR), eq(expected), eq("Failed to capture cached envelope %s"), eq(testFile.absolutePath))
-        verifyNoMoreInteractions(fixture.hub)
+        verifyNoMoreInteractions(fixture.scopes)
     }
 }

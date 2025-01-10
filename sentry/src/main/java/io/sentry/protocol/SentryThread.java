@@ -2,12 +2,14 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
+import io.sentry.SentryLockReason;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jetbrains.annotations.NotNull;
@@ -35,7 +37,10 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
   private @Nullable Boolean crashed;
   private @Nullable Boolean current;
   private @Nullable Boolean daemon;
+  private @Nullable Boolean main;
   private @Nullable SentryStackTrace stacktrace;
+
+  private @Nullable Map<String, SentryLockReason> heldLocks;
 
   @SuppressWarnings("unused")
   private @Nullable Map<String, Object> unknown;
@@ -167,6 +172,29 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
   }
 
   /**
+   * If applicable, a flag indicating whether the thread was responsible for rendering the user
+   * interface. On mobile platforms this is oftentimes referred to as the "main thread" or "ui
+   * thread".
+   *
+   * @return if its the main thread or not
+   */
+  @Nullable
+  public Boolean isMain() {
+    return main;
+  }
+
+  /**
+   * If applicable, a flag indicating whether the thread was responsible for rendering the user
+   * interface. On mobile platforms this is oftentimes referred to as the "main thread" or "ui
+   * thread".
+   *
+   * @param main if its the main thread or not
+   */
+  public void setMain(final @Nullable Boolean main) {
+    this.main = main;
+  }
+
+  /**
    * Gets the state of the thread.
    *
    * @return the state of the thread.
@@ -182,6 +210,24 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
    */
   public void setState(final @Nullable String state) {
     this.state = state;
+  }
+
+  /**
+   * Gets locks held by this thread.
+   *
+   * @return locks held by this thread
+   */
+  public @Nullable Map<String, SentryLockReason> getHeldLocks() {
+    return heldLocks;
+  }
+
+  /**
+   * Sets locks held by this thread.
+   *
+   * @param heldLocks list of locks held by this thread
+   */
+  public void setHeldLocks(final @Nullable Map<String, SentryLockReason> heldLocks) {
+    this.heldLocks = heldLocks;
   }
 
   // region json
@@ -205,11 +251,13 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
     public static final String CRASHED = "crashed";
     public static final String CURRENT = "current";
     public static final String DAEMON = "daemon";
+    public static final String MAIN = "main";
     public static final String STACKTRACE = "stacktrace";
+    public static final String HELD_LOCKS = "held_locks";
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (id != null) {
@@ -233,8 +281,14 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
     if (daemon != null) {
       writer.name(JsonKeys.DAEMON).value(daemon);
     }
+    if (main != null) {
+      writer.name(JsonKeys.MAIN).value(main);
+    }
     if (stacktrace != null) {
       writer.name(JsonKeys.STACKTRACE).value(logger, stacktrace);
+    }
+    if (heldLocks != null) {
+      writer.name(JsonKeys.HELD_LOCKS).value(logger, heldLocks);
     }
     if (unknown != null) {
       for (String key : unknown.keySet()) {
@@ -249,8 +303,8 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
   public static final class Deserializer implements JsonDeserializer<SentryThread> {
     @SuppressWarnings("unchecked")
     @Override
-    public @NotNull SentryThread deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull SentryThread deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
       SentryThread sentryThread = new SentryThread();
       Map<String, Object> unknown = null;
       reader.beginObject();
@@ -278,9 +332,19 @@ public final class SentryThread implements JsonUnknown, JsonSerializable {
           case JsonKeys.DAEMON:
             sentryThread.daemon = reader.nextBooleanOrNull();
             break;
+          case JsonKeys.MAIN:
+            sentryThread.main = reader.nextBooleanOrNull();
+            break;
           case JsonKeys.STACKTRACE:
             sentryThread.stacktrace =
                 reader.nextOrNull(logger, new SentryStackTrace.Deserializer());
+            break;
+          case JsonKeys.HELD_LOCKS:
+            final Map<String, SentryLockReason> heldLocks =
+                reader.nextMapOrNull(logger, new SentryLockReason.Deserializer());
+            if (heldLocks != null) {
+              sentryThread.heldLocks = new HashMap<>(heldLocks);
+            }
             break;
           default:
             if (unknown == null) {

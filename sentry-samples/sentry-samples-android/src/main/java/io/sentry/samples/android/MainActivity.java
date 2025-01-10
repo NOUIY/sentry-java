@@ -2,12 +2,14 @@ package io.sentry.samples.android;
 
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
 import androidx.appcompat.app.AppCompatActivity;
 import io.sentry.Attachment;
 import io.sentry.ISpan;
 import io.sentry.MeasurementUnit;
 import io.sentry.Sentry;
 import io.sentry.UserFeedback;
+import io.sentry.instrumentation.file.SentryFileOutputStream;
 import io.sentry.protocol.SentryId;
 import io.sentry.protocol.User;
 import io.sentry.samples.android.compose.ComposeActivity;
@@ -19,9 +21,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
 import timber.log.Timber;
 
 public class MainActivity extends AppCompatActivity {
@@ -29,7 +34,10 @@ public class MainActivity extends AppCompatActivity {
   private int crashCount = 0;
   private int screenLoadCount = 0;
 
+  final Object mutex = new Object();
+
   @Override
+  @SuppressWarnings("deprecation")
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
 
@@ -78,7 +86,7 @@ public class MainActivity extends AppCompatActivity {
         view -> {
           String fileName = Calendar.getInstance().getTimeInMillis() + "_file.txt";
           File file = getApplication().getFileStreamPath(fileName);
-          try (final FileOutputStream fileOutputStream = new FileOutputStream(file);
+          try (final FileOutputStream fileOutputStream = new SentryFileOutputStream(file);
               final OutputStreamWriter outputStreamWriter =
                   new OutputStreamWriter(fileOutputStream);
               final Writer writer = new BufferedWriter(outputStreamWriter)) {
@@ -134,6 +142,30 @@ public class MainActivity extends AppCompatActivity {
           Sentry.setUser(user);
         });
 
+    binding.outOfMemory.setOnClickListener(
+        view -> {
+          final CountDownLatch latch = new CountDownLatch(1);
+          for (int i = 0; i < 20; i++) {
+            new Thread(
+                    () -> {
+                      final List<String> data = new ArrayList<>();
+                      try {
+                        latch.await();
+                        for (int j = 0; j < 1_000_000; j++) {
+                          data.add(new String(new byte[1024 * 8]));
+                        }
+                      } catch (InterruptedException e) {
+                        e.printStackTrace();
+                      }
+                    })
+                .start();
+          }
+
+          latch.countDown();
+        });
+
+    binding.stackOverflow.setOnClickListener(view -> stackOverflow());
+
     binding.nativeCrash.setOnClickListener(view -> NativeSample.crash());
 
     binding.nativeCapture.setOnClickListener(view -> NativeSample.message());
@@ -147,11 +179,35 @@ public class MainActivity extends AppCompatActivity {
           // Sentry.
           // NOTE: By default it doesn't raise if the debugger is attached. That can also be
           // configured.
-          try {
-            Thread.sleep(10000);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
+          new Thread(
+                  new Runnable() {
+                    @Override
+                    public void run() {
+                      synchronized (mutex) {
+                        while (true) {
+                          try {
+                            Thread.sleep(10000);
+                          } catch (InterruptedException e) {
+                            e.printStackTrace();
+                          }
+                        }
+                      }
+                    }
+                  })
+              .start();
+
+          new Handler()
+              .postDelayed(
+                  new Runnable() {
+                    @Override
+                    public void run() {
+                      synchronized (mutex) {
+                        // Shouldn't happen
+                        throw new IllegalStateException();
+                      }
+                    }
+                  },
+                  1000);
         });
 
     binding.openSecondActivity.setOnClickListener(
@@ -195,7 +251,14 @@ public class MainActivity extends AppCompatActivity {
           startActivity(new Intent(this, ProfilingActivity.class));
         });
 
+    binding.openFrameDataForSpans.setOnClickListener(
+        view -> startActivity(new Intent(this, FrameDataForSpansActivity.class)));
+
     setContentView(binding.getRoot());
+  }
+
+  private void stackOverflow() {
+    stackOverflow();
   }
 
   @Override
@@ -204,8 +267,11 @@ public class MainActivity extends AppCompatActivity {
     screenLoadCount++;
     final ISpan span = Sentry.getSpan();
     if (span != null) {
-      span.setMeasurement("screen_load_count", screenLoadCount, new MeasurementUnit.Custom("test"));
-      // span.finish(SpanStatus.OK);
+      ISpan measurementSpan = span.startChild("screen_load_measurement", "test measurement");
+      measurementSpan.setMeasurement(
+          "screen_load_count", screenLoadCount, new MeasurementUnit.Custom("test"));
+      measurementSpan.finish();
     }
+    Sentry.reportFullyDisplayed();
   }
 }

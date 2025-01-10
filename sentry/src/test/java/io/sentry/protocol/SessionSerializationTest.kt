@@ -11,7 +11,6 @@ import org.junit.Test
 import org.mockito.kotlin.mock
 import java.io.StringReader
 import java.io.StringWriter
-import java.util.UUID
 import kotlin.test.assertEquals
 
 class SessionSerializationTest {
@@ -25,14 +24,15 @@ class SessionSerializationTest {
             DateUtils.getDateTime("1970-04-21T09:32:21.000Z"),
             9001,
             "631693c2-3d61-4a93-8fd1-89817426ba5a",
-            UUID.fromString("3c1ffc32-f68f-4af2-a1ee-dd72f4d62d17"),
+            "3c1ffc32-f68f-4af2-a1ee-dd72f4d62d17",
             true,
             4,
             5.5,
             "5a174e69-a297-4ba4-b6e1-2244a8299ec8",
             "790da4ae-50ca-48a2-98f6-9b7f4e05a8c3",
             "d732be55-b57e-48ec-afe6-b0040c7f93de",
-            "b2d0224b-4b1f-49db-94c9-fd4a439b3ef5"
+            "b2d0224b-4b1f-49db-94c9-fd4a439b3ef5",
+            "anr_foreground"
         )
     }
     private val fixture = Fixture()

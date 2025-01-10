@@ -6,6 +6,8 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
+import kotlin.test.assertNotNull
 
 /** Mocks a relay server. */
 class MockRelay(
@@ -22,31 +24,40 @@ class MockRelay(
     /** List of unasserted requests sent to the [envelopePath]. */
     private val unassertedEnvelopes = mutableListOf<RelayAsserter.RelayResponse>()
 
-    /** List of unasserted requests not contained in [unassertedEnvelopes]. */
-    private val unassertedRequests = mutableListOf<RelayAsserter.RelayResponse>()
-
     /** List of responses to return when a request is sent. */
     private val responses = mutableListOf<(RecordedRequest) -> MockResponse?>()
+
+    /** Set to check already received envelopes, to avoid duplicates due to e.g. retrying. */
+    private val receivedEnvelopes: MutableSet<String> = HashSet()
 
     init {
         relay.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 // We check if there is any custom response previously set to return to this request,
                 // otherwise we return a successful MockResponse.
-                val response = responses.asSequence()
-                    .mapNotNull { it(request) }
-                    .firstOrNull()
-                    ?: MockResponse()
+                val response = responses.removeFirstOrNull()?.let { it(request) } ?: MockResponse()
 
-                // Based on the path of the request, we populate the right list.
-                val relayResponse = RelayAsserter.RelayResponse(request, response)
-                when (request.path) {
-                    envelopePath -> {
-                        unassertedEnvelopes.add(relayResponse)
+                // We should receive only envelopes on this path.
+                if (request.path == envelopePath) {
+                    val relayResponse = RelayAsserter.RelayResponse(request, response)
+                    // If we reply with NO_RESPONSE, we can ignore the request, so we can return here
+                    if (relayResponse.envelope == null || response.socketPolicy == SocketPolicy.NO_RESPONSE) {
+                        // If we are waiting for requests to be received, we decrement the associated counter.
+                        if (waitForRequests) {
+                            relayIdlingResource.decrement()
+                        }
+                        return response
                     }
-                    else -> {
-                        unassertedRequests.add(relayResponse)
+                    assertNotNull(relayResponse.envelope)
+                    val envelopeId: String = relayResponse.envelope!!.header.eventId!!.toString()
+                    // If we already received the envelope (e.g. retrying mechanism) we ignore it
+                    if (receivedEnvelopes.contains(envelopeId)) {
+                        return MockResponse()
                     }
+                    receivedEnvelopes.add(envelopeId)
+                    unassertedEnvelopes.add(relayResponse)
+                } else {
+                    throw AssertionError("Expected $envelopePath, but the request path was ${request.path}")
                 }
 
                 // If we are waiting for requests to be received, we decrement the associated counter.
@@ -62,7 +73,10 @@ class MockRelay(
     fun createMockDsn() = "http://key@${relay.hostName}:${relay.port}/$dsnProject"
 
     /** Starts the mock relay server. */
-    fun start() = relay.start()
+    fun start() {
+        receivedEnvelopes.clear()
+        relay.start()
+    }
 
     /** Shutdown the mock relay server and clear everything. */
     fun shutdown() {
@@ -75,6 +89,13 @@ class MockRelay(
         // Responses are added to the beginning of the list so they'll take precedence over
         // previously added ones.
         responses.add(0, response)
+    }
+
+    /** Add a custom response to be returned at the next request received. */
+    fun addTimeoutResponse() {
+        addResponse {
+            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+        }
     }
 
     /** Add a custom response to be returned at the next request received, if it satisfies the [filter]. */
@@ -98,6 +119,6 @@ class MockRelay(
         if (waitForRequests) {
             waitUntilIdle()
         }
-        assertion(RelayAsserter(unassertedEnvelopes, unassertedRequests))
+        assertion(RelayAsserter(unassertedEnvelopes))
     }
 }

@@ -1,25 +1,40 @@
 package io.sentry.android.core
 
 import android.content.Context
+import android.content.res.AssetManager
+import android.os.Build
 import android.os.Bundle
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.sentry.DefaultTransactionPerformanceCollector
 import io.sentry.ILogger
 import io.sentry.MainEventProcessor
 import io.sentry.SentryOptions
 import io.sentry.android.core.cache.AndroidEnvelopeCache
+import io.sentry.android.core.internal.gestures.AndroidViewGestureTargetLocator
 import io.sentry.android.core.internal.modules.AssetsModulesLoader
+import io.sentry.android.core.internal.util.AndroidThreadChecker
 import io.sentry.android.fragment.FragmentLifecycleIntegration
+import io.sentry.android.replay.ReplayIntegration
 import io.sentry.android.timber.SentryTimberIntegration
+import io.sentry.cache.PersistingOptionsObserver
+import io.sentry.cache.PersistingScopeObserver
+import io.sentry.compose.gestures.ComposeGestureTargetLocator
 import org.junit.runner.RunWith
 import org.mockito.kotlin.any
+import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.spy
+import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.robolectric.annotation.Config
 import java.io.File
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -37,15 +52,17 @@ class AndroidOptionsInitializerTest {
             hasAppContext: Boolean = true,
             useRealContext: Boolean = false,
             configureOptions: SentryAndroidOptions.() -> Unit = {},
-            configureContext: Context.() -> Unit = {}
+            configureContext: Context.() -> Unit = {},
+            assets: AssetManager? = null
         ) {
             mockContext = if (metadata != null) {
-                ContextUtilsTest.mockMetaData(
-                    mockContext = ContextUtilsTest.createMockContext(hasAppContext),
-                    metaData = metadata
+                ContextUtilsTestHelper.mockMetaData(
+                    mockContext = ContextUtilsTestHelper.createMockContext(hasAppContext),
+                    metaData = metadata,
+                    assets = assets
                 )
             } else {
-                ContextUtilsTest.createMockContext(hasAppContext)
+                ContextUtilsTestHelper.createMockContext(hasAppContext)
             }
             whenever(mockContext.cacheDir).thenReturn(file)
             if (mockContext.applicationContext != null) {
@@ -56,27 +73,46 @@ class AndroidOptionsInitializerTest {
                 sentryOptions,
                 if (useRealContext) context else mockContext
             )
+
+            val loadClass = LoadClass()
+            val activityFramesTracker = ActivityFramesTracker(loadClass, sentryOptions)
+
+            AndroidOptionsInitializer.installDefaultIntegrations(
+                if (useRealContext) context else mockContext,
+                sentryOptions,
+                BuildInfoProvider(AndroidLogger()),
+                loadClass,
+                activityFramesTracker,
+                false,
+                false,
+                false
+            )
+
             sentryOptions.configureOptions()
             AndroidOptionsInitializer.initializeIntegrationsAndProcessors(
                 sentryOptions,
-                if (useRealContext) context else mockContext
+                if (useRealContext) context else mockContext,
+                loadClass,
+                activityFramesTracker
             )
         }
 
         fun initSutWithClassLoader(
-            minApi: Int = 16,
-            classToLoad: Class<*>? = null,
+            classesToLoad: List<String> = emptyList(),
             isFragmentAvailable: Boolean = false,
-            isTimberAvailable: Boolean = false
+            isTimberAvailable: Boolean = false,
+            isReplayAvailable: Boolean = false
         ) {
-            mockContext = ContextUtilsTest.mockMetaData(
-                mockContext = ContextUtilsTest.createMockContext(hasAppContext = true),
+            mockContext = ContextUtilsTestHelper.mockMetaData(
+                mockContext = ContextUtilsTestHelper.createMockContext(hasAppContext = true),
                 metaData = Bundle().apply {
                     putString(ManifestMetadataReader.DSN, "https://key@sentry.io/123")
                 }
             )
             sentryOptions.isDebug = true
-            val buildInfo = createBuildInfo(minApi)
+            val buildInfo = createBuildInfo()
+            val loadClass = createClassMock(classesToLoad)
+            val activityFramesTracker = ActivityFramesTracker(loadClass, sentryOptions)
 
             AndroidOptionsInitializer.loadDefaultAndMetadataOptions(
                 sentryOptions,
@@ -84,26 +120,41 @@ class AndroidOptionsInitializerTest {
                 logger,
                 buildInfo
             )
+
+            AndroidOptionsInitializer.installDefaultIntegrations(
+                context,
+                sentryOptions,
+                buildInfo,
+                loadClass,
+                activityFramesTracker,
+                isFragmentAvailable,
+                isTimberAvailable,
+                isReplayAvailable
+            )
+
             AndroidOptionsInitializer.initializeIntegrationsAndProcessors(
                 sentryOptions,
                 context,
                 buildInfo,
-                createClassMock(classToLoad),
-                isFragmentAvailable,
-                isTimberAvailable
+                loadClass,
+                activityFramesTracker
             )
         }
 
-        private fun createBuildInfo(minApi: Int = 16): BuildInfoProvider {
+        private fun createBuildInfo(): BuildInfoProvider {
             val buildInfo = mock<BuildInfoProvider>()
-            whenever(buildInfo.sdkInfoVersion).thenReturn(minApi)
+            whenever(buildInfo.sdkInfoVersion).thenReturn(Build.VERSION_CODES.LOLLIPOP)
             return buildInfo
         }
 
-        private fun createClassMock(clazz: Class<*>?): LoadClass {
+        private fun createClassMock(classes: List<String>): LoadClass {
             val loadClassMock = mock<LoadClass>()
-            whenever(loadClassMock.loadClass(any(), any())).thenReturn(clazz)
-            whenever(loadClassMock.isClassAvailable(any(), any<ILogger>())).thenReturn(clazz != null)
+            classes.forEach {
+                whenever(loadClassMock.loadClass(eq(it), any()))
+                    .thenReturn(Class.forName(it, false, this::class.java.classLoader))
+                whenever(loadClassMock.isClassAvailable(eq(it), any<SentryOptions>()))
+                    .thenReturn(true)
+            }
             return loadClassMock
         }
     }
@@ -128,10 +179,24 @@ class AndroidOptionsInitializerTest {
     }
 
     @Test
+    fun `flush timeout is set to Android specific default value`() {
+        fixture.initSut()
+        assertEquals(AndroidOptionsInitializer.DEFAULT_FLUSH_TIMEOUT_MS, fixture.sentryOptions.flushTimeoutMillis)
+    }
+
+    @Test
+    fun `flush timeout can be overridden`() {
+        fixture.initSut(configureOptions = {
+            flushTimeoutMillis = 1234
+        })
+        assertEquals(1234, fixture.sentryOptions.flushTimeoutMillis)
+    }
+
+    @Test
     fun `AndroidEventProcessor added to processors list`() {
         fixture.initSut()
         val actual =
-            fixture.sentryOptions.eventProcessors.any { it is DefaultAndroidEventProcessor }
+            fixture.sentryOptions.eventProcessors.firstOrNull { it is DefaultAndroidEventProcessor }
         assertNotNull(actual)
     }
 
@@ -139,7 +204,7 @@ class AndroidOptionsInitializerTest {
     fun `PerformanceAndroidEventProcessor added to processors list`() {
         fixture.initSut()
         val actual =
-            fixture.sentryOptions.eventProcessors.any { it is PerformanceAndroidEventProcessor }
+            fixture.sentryOptions.eventProcessors.firstOrNull { it is PerformanceAndroidEventProcessor }
         assertNotNull(actual)
     }
 
@@ -154,7 +219,23 @@ class AndroidOptionsInitializerTest {
     fun `ScreenshotEventProcessor added to processors list`() {
         fixture.initSut()
         val actual =
-            fixture.sentryOptions.eventProcessors.any { it is ScreenshotEventProcessor }
+            fixture.sentryOptions.eventProcessors.firstOrNull { it is ScreenshotEventProcessor }
+        assertNotNull(actual)
+    }
+
+    @Test
+    fun `ViewHierarchyEventProcessor added to processors list`() {
+        fixture.initSut()
+        val actual =
+            fixture.sentryOptions.eventProcessors.firstOrNull { it is ViewHierarchyEventProcessor }
+        assertNotNull(actual)
+    }
+
+    @Test
+    fun `AnrV2EventProcessor added to processors list`() {
+        fixture.initSut()
+        val actual =
+            fixture.sentryOptions.eventProcessors.firstOrNull { it is AnrV2EventProcessor }
         assertNotNull(actual)
     }
 
@@ -167,6 +248,12 @@ class AndroidOptionsInitializerTest {
                 "${File.separator}cache${File.separator}sentry"
             )!!
         )
+    }
+
+    @Test
+    fun `getCacheDir returns sentry subfolder`() {
+        fixture.initSut()
+        assertTrue(AndroidOptionsInitializer.getCacheDir(fixture.context).path.endsWith("${File.separator}cache${File.separator}sentry"))
     }
 
     @Test
@@ -266,23 +353,15 @@ class AndroidOptionsInitializerTest {
 
     @Test
     fun `NdkIntegration will load SentryNdk class and add to the integration list`() {
-        fixture.initSutWithClassLoader(classToLoad = SentryNdk::class.java)
+        fixture.initSutWithClassLoader(classesToLoad = listOfNotNull(NdkIntegration.SENTRY_NDK_CLASS_NAME))
 
         val actual = fixture.sentryOptions.integrations.firstOrNull { it is NdkIntegration }
         assertNotNull((actual as NdkIntegration).sentryNdkClass)
     }
 
     @Test
-    fun `NdkIntegration won't be enabled because API is lower than 16`() {
-        fixture.initSutWithClassLoader(minApi = 14, classToLoad = SentryNdk::class.java)
-
-        val actual = fixture.sentryOptions.integrations.firstOrNull { it is NdkIntegration }
-        assertNull((actual as NdkIntegration).sentryNdkClass)
-    }
-
-    @Test
     fun `NdkIntegration won't be enabled, if class not found`() {
-        fixture.initSutWithClassLoader(classToLoad = null)
+        fixture.initSutWithClassLoader(classesToLoad = emptyList())
 
         val actual = fixture.sentryOptions.integrations.firstOrNull { it is NdkIntegration }
         assertNull((actual as NdkIntegration).sentryNdkClass)
@@ -294,6 +373,16 @@ class AndroidOptionsInitializerTest {
 
         val actual = fixture.sentryOptions.integrations.firstOrNull { it is AnrIntegration }
         assertNotNull(actual)
+    }
+
+    @Test
+    fun `AnrIntegration is added after AppLifecycleIntegration`() {
+        fixture.initSut()
+
+        val appLifecycleIndex =
+            fixture.sentryOptions.integrations.indexOfFirst { it is AppLifecycleIntegration }
+        val anrIndex = fixture.sentryOptions.integrations.indexOfFirst { it is AnrIntegration }
+        assertTrue { appLifecycleIndex < anrIndex }
     }
 
     @Test
@@ -335,6 +424,15 @@ class AndroidOptionsInitializerTest {
 
         val actual = fixture.sentryOptions.integrations
             .firstOrNull { it is ActivityLifecycleIntegration }
+        assertNull(actual)
+    }
+
+    @Test
+    fun `When given Context is not an Application class, do not add ActivityBreadcrumbsIntegration`() {
+        fixture.initSut(hasAppContext = false)
+
+        val actual = fixture.sentryOptions.integrations
+            .firstOrNull { it is ActivityBreadcrumbsIntegration }
         assertNull(actual)
     }
 
@@ -384,6 +482,31 @@ class AndroidOptionsInitializerTest {
     }
 
     @Test
+    fun `ReplayIntegration added to the integration list if available on classpath`() {
+        fixture.initSutWithClassLoader(isReplayAvailable = true)
+
+        val actual =
+            fixture.sentryOptions.integrations.firstOrNull { it is ReplayIntegration }
+        assertNotNull(actual)
+    }
+
+    @Test
+    fun `ReplayIntegration set as ReplayController if available on classpath`() {
+        fixture.initSutWithClassLoader(isReplayAvailable = true)
+
+        assertTrue(fixture.sentryOptions.replayController is ReplayIntegration)
+    }
+
+    @Test
+    fun `ReplayIntegration won't be enabled, it throws class not found`() {
+        fixture.initSutWithClassLoader(isReplayAvailable = false)
+
+        val actual =
+            fixture.sentryOptions.integrations.firstOrNull { it is ReplayIntegration }
+        assertNull(actual)
+    }
+
+    @Test
     fun `AndroidEnvelopeCache is set to options`() {
         fixture.initSut()
 
@@ -391,11 +514,39 @@ class AndroidOptionsInitializerTest {
     }
 
     @Test
-    fun `When Activity Frames Tracking is enabled, the Activity Frames Tracker should be available`() {
+    fun `CurrentActivityIntegration is added by default`() {
+        fixture.initSut(useRealContext = true)
+
+        val actual =
+            fixture.sentryOptions.integrations.firstOrNull { it is CurrentActivityIntegration }
+        assertNotNull(actual)
+    }
+
+    @Test
+    fun `When Activity Frames Tracking is enabled, the Activity Frames Tracker should be unavailable`() {
         fixture.initSut(
             hasAppContext = true,
             useRealContext = true,
             configureOptions = {
+                isEnableFramesTracking = true
+            }
+        )
+
+        val activityLifeCycleIntegration = fixture.sentryOptions.integrations
+            .first { it is ActivityLifecycleIntegration }
+
+        assertFalse(
+            (activityLifeCycleIntegration as ActivityLifecycleIntegration).activityFramesTracker.isFrameMetricsAggregatorAvailable
+        )
+    }
+
+    @Test
+    fun `When Activity Frames Tracking is enabled, the Activity Frames Tracker should be available if perfv2 is false`() {
+        fixture.initSut(
+            hasAppContext = true,
+            useRealContext = true,
+            configureOptions = {
+                isEnablePerformanceV2 = false
                 isEnableFramesTracking = true
             }
         )
@@ -423,12 +574,32 @@ class AndroidOptionsInitializerTest {
     }
 
     @Test
-    fun `When Frames Tracking is initially disabled, but enabled via configureOptions it should be available`() {
+    fun `When Frames Tracking is initially disabled, but enabled via configureOptions it should be unavailable`() {
         fixture.sentryOptions.isEnableFramesTracking = false
         fixture.initSut(
             hasAppContext = true,
             useRealContext = true,
             configureOptions = {
+                isEnableFramesTracking = true
+            }
+        )
+
+        val activityLifeCycleIntegration = fixture.sentryOptions.integrations
+            .first { it is ActivityLifecycleIntegration }
+
+        assertFalse(
+            (activityLifeCycleIntegration as ActivityLifecycleIntegration).activityFramesTracker.isFrameMetricsAggregatorAvailable
+        )
+    }
+
+    @Test
+    fun `When Frames Tracking is initially disabled, but enabled via configureOptions it should be available if perfv2 is false`() {
+        fixture.sentryOptions.isEnableFramesTracking = false
+        fixture.initSut(
+            hasAppContext = true,
+            useRealContext = true,
+            configureOptions = {
+                isEnablePerformanceV2 = false
                 isEnableFramesTracking = true
             }
         )
@@ -446,5 +617,115 @@ class AndroidOptionsInitializerTest {
         fixture.initSut()
 
         assertTrue { fixture.sentryOptions.modulesLoader is AssetsModulesLoader }
+    }
+
+    @Test
+    fun `AndroidThreadChecker is set to options`() {
+        fixture.initSut()
+
+        assertTrue { fixture.sentryOptions.threadChecker is AndroidThreadChecker }
+    }
+
+    @Test
+    fun `does not install ComposeGestureTargetLocator, if sentry-compose is not available`() {
+        fixture.initSutWithClassLoader()
+
+        assertTrue { fixture.sentryOptions.gestureTargetLocators.size == 1 }
+        assertTrue { fixture.sentryOptions.gestureTargetLocators[0] is AndroidViewGestureTargetLocator }
+    }
+
+    @Test
+    fun `installs ComposeGestureTargetLocator, if sentry-compose is available`() {
+        fixture.initSutWithClassLoader(
+            classesToLoad = listOf(
+                AndroidOptionsInitializer.COMPOSE_CLASS_NAME,
+                AndroidOptionsInitializer.SENTRY_COMPOSE_GESTURE_INTEGRATION_CLASS_NAME
+            )
+        )
+
+        assertTrue { fixture.sentryOptions.gestureTargetLocators.size == 2 }
+        assertTrue { fixture.sentryOptions.gestureTargetLocators[0] is AndroidViewGestureTargetLocator }
+        assertTrue { fixture.sentryOptions.gestureTargetLocators[1] is ComposeGestureTargetLocator }
+    }
+
+    @Test
+    fun `AndroidMemoryCollector is set to options`() {
+        fixture.initSut()
+
+        assertTrue { fixture.sentryOptions.performanceCollectors.any { it is AndroidMemoryCollector } }
+    }
+
+    @Test
+    fun `AndroidCpuCollector is set to options`() {
+        fixture.initSut()
+
+        assertTrue { fixture.sentryOptions.performanceCollectors.any { it is AndroidCpuCollector } }
+    }
+
+    @Test
+    fun `DefaultTransactionPerformanceCollector is set to options`() {
+        fixture.initSut()
+
+        assertIs<DefaultTransactionPerformanceCollector>(fixture.sentryOptions.transactionPerformanceCollector)
+    }
+
+    @Test
+    fun `PersistingScopeObserver is set to options`() {
+        fixture.initSut()
+
+        assertTrue { fixture.sentryOptions.scopeObservers.any { it is PersistingScopeObserver } }
+    }
+
+    @Test
+    fun `PersistingOptionsObserver is set to options`() {
+        fixture.initSut()
+
+        assertTrue { fixture.sentryOptions.optionsObservers.any { it is PersistingOptionsObserver } }
+    }
+
+    @Test
+    fun `when cacheDir is not set, persisting observers are not set to options`() {
+        fixture.initSut(configureOptions = { cacheDirPath = null })
+
+        assertFalse(fixture.sentryOptions.optionsObservers.any { it is PersistingOptionsObserver })
+        assertFalse(fixture.sentryOptions.scopeObservers.any { it is PersistingScopeObserver })
+    }
+
+    @Test
+    fun `installDefaultIntegrations does not evaluate cacheDir or outboxPath when called`() {
+        val mockOptions = spy(fixture.sentryOptions)
+        AndroidOptionsInitializer.installDefaultIntegrations(
+            fixture.context,
+            mockOptions,
+            mock(),
+            mock(),
+            mock(),
+            false,
+            false,
+            false
+        )
+        verify(mockOptions, never()).outboxPath
+        verify(mockOptions, never()).cacheDirPath
+    }
+
+    @Config(sdk = [30])
+    @Test
+    fun `AnrV2Integration added to integrations list for API 30 and above`() {
+        fixture.initSut(useRealContext = true)
+
+        val anrv2Integration =
+            fixture.sentryOptions.integrations.firstOrNull { it is AnrV2Integration }
+        assertNotNull(anrv2Integration)
+
+        val anrv1Integration =
+            fixture.sentryOptions.integrations.firstOrNull { it is AnrIntegration }
+        assertNull(anrv1Integration)
+    }
+
+    @Test
+    fun `PersistingScopeObserver is not set to options, if scope persistence is disabled`() {
+        fixture.initSut(configureOptions = { isEnableScopePersistence = false })
+
+        assertTrue { fixture.sentryOptions.scopeObservers.none { it is PersistingScopeObserver } }
     }
 }

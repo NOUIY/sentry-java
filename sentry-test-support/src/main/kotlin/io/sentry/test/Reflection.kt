@@ -12,16 +12,23 @@ inline fun <reified T : Any> T.callMethod(name: String, parameterTypes: Class<*>
     val declaredMethod = try {
         T::class.java.getDeclaredMethod(name, parameterTypes)
     } catch (e: NoSuchMethodException) {
-        T::class.java.interfaces.first { it.containsMethod(name, parameterTypes) }.getDeclaredMethod(name, parameterTypes)
+        collectInterfaceHierarchy(T::class.java).first { it.containsMethod(name, parameterTypes) }.getDeclaredMethod(name, parameterTypes)
     }
     return declaredMethod.invoke(this, value)
+}
+
+fun collectInterfaceHierarchy(clazz: Class<*>): List<Class<*>> {
+    if (clazz.interfaces.isEmpty()) {
+        return listOf(clazz)
+    }
+    return clazz.interfaces.flatMap { iface -> collectInterfaceHierarchy(iface) }.also { it.toMutableList().add(clazz) }
 }
 
 inline fun <reified T : Any> T.callMethod(name: String, parameterTypes: Array<Class<*>>, vararg value: Any?): Any? {
     val declaredMethod = try {
         T::class.java.getDeclaredMethod(name, *parameterTypes)
     } catch (e: NoSuchMethodException) {
-        T::class.java.interfaces.first { it.containsMethod(name, parameterTypes) }.getDeclaredMethod(name, *parameterTypes)
+        collectInterfaceHierarchy(T::class.java).first { it.containsMethod(name, parameterTypes) }.getDeclaredMethod(name, *parameterTypes)
     }
     return declaredMethod.invoke(this, *value)
 }
@@ -51,4 +58,11 @@ inline fun <reified T> Any.getProperty(clz: Class<*>, name: String): T =
 fun String.getCtor(ctorTypes: Array<Class<*>>): Constructor<*> {
     val clazz = Class.forName(this)
     return clazz.getConstructor(*ctorTypes)
+}
+
+fun String.getDeclaredCtor(ctorTypes: Array<Class<*>>): Constructor<*> {
+    val clazz = Class.forName(this)
+    val constructor = clazz.getDeclaredConstructor(*ctorTypes)
+    constructor.isAccessible = true
+    return constructor
 }

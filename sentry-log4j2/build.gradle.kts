@@ -21,8 +21,9 @@ tasks.withType<KotlinCompile>().configureEach {
 
 dependencies {
     api(projects.sentry)
-    implementation(Config.Libs.log4j2Api)
-    implementation(Config.Libs.log4j2Core)
+    compileOnly(Config.Libs.log4j2Api)
+    compileOnly(Config.Libs.log4j2Core)
+    annotationProcessor(Config.Libs.log4j2Core)
 
     compileOnly(Config.CompileOnly.nopen)
     errorprone(Config.CompileOnly.nopenChecker)
@@ -35,6 +36,8 @@ dependencies {
     testImplementation(kotlin(Config.kotlinStdLib))
     testImplementation(Config.TestLibs.kotlinTestJunit)
     testImplementation(Config.TestLibs.mockitoKotlin)
+    testImplementation(Config.Libs.log4j2Api)
+    testImplementation(Config.Libs.log4j2Core)
 }
 
 configure<SourceSetContainer> {

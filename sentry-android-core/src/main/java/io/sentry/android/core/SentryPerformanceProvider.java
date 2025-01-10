@@ -1,62 +1,68 @@
 package io.sentry.android.core;
 
-import android.app.Activity;
+import static io.sentry.Sentry.APP_START_PROFILING_CONFIG_FILE_NAME;
+
+import android.annotation.SuppressLint;
 import android.app.Application;
-import android.content.ContentProvider;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.ProviderInfo;
-import android.database.Cursor;
 import android.net.Uri;
-import android.os.Bundle;
+import android.os.Process;
 import android.os.SystemClock;
-import io.sentry.DateUtils;
-import java.util.Date;
+import io.sentry.ILogger;
+import io.sentry.ISentryLifecycleToken;
+import io.sentry.ITransactionProfiler;
+import io.sentry.JsonSerializer;
+import io.sentry.SentryAppStartProfilingOptions;
+import io.sentry.SentryExecutorService;
+import io.sentry.SentryLevel;
+import io.sentry.SentryOptions;
+import io.sentry.TracesSamplingDecision;
+import io.sentry.android.core.internal.util.SentryFrameMetricsCollector;
+import io.sentry.android.core.performance.AppStartMetrics;
+import io.sentry.android.core.performance.TimeSpan;
+import io.sentry.util.AutoClosableReentrantLock;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.InputStreamReader;
+import java.io.Reader;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
 
-/**
- * SentryPerformanceProvider is responsible for collecting data (eg appStart) as early as possible
- * as ContentProvider is the only reliable hook for libraries that works across all the supported
- * SDK versions. When minSDK is >= 24, we could use Process.getStartUptimeMillis() We could also use
- * AppComponentFactory but it depends on androidx.core.app.AppComponentFactory
- */
 @ApiStatus.Internal
-public final class SentryPerformanceProvider extends ContentProvider
-    implements Application.ActivityLifecycleCallbacks {
+public final class SentryPerformanceProvider extends EmptySecureContentProvider {
 
   // static to rely on Class load
-  private static @NotNull Date appStartTime = DateUtils.getCurrentDateTime();
   // SystemClock.uptimeMillis() isn't affected by phone provider or clock changes.
-  private static long appStartMillis = SystemClock.uptimeMillis();
+  private static final long sdkInitMillis = SystemClock.uptimeMillis();
 
-  private boolean firstActivityCreated = false;
-  private @Nullable Application application;
+  private @Nullable Application app;
+
+  private final @NotNull ILogger logger;
+  private final @NotNull BuildInfoProvider buildInfoProvider;
+  private final @NotNull AutoClosableReentrantLock lock = new AutoClosableReentrantLock();
+
+  @TestOnly
+  SentryPerformanceProvider(
+      final @NotNull ILogger logger, final @NotNull BuildInfoProvider buildInfoProvider) {
+    this.logger = logger;
+    this.buildInfoProvider = buildInfoProvider;
+  }
 
   public SentryPerformanceProvider() {
-    AppStartState.getInstance().setAppStartTime(appStartMillis, appStartTime);
+    logger = new AndroidLogger();
+    buildInfoProvider = new BuildInfoProvider(logger);
   }
 
   @Override
   public boolean onCreate() {
-    Context context = getContext();
-
-    if (context == null) {
-      return false;
-    }
-
-    // it returns null if ContextImpl, so let's check for nullability
-    if (context.getApplicationContext() != null) {
-      context = context.getApplicationContext();
-    }
-
-    if (context instanceof Application) {
-      application = ((Application) context);
-      application.registerActivityLifecycleCallbacks(this);
-    }
-
+    final @NotNull AppStartMetrics appStartMetrics = AppStartMetrics.getInstance();
+    onAppLaunched(getContext(), appStartMetrics);
+    launchAppStartProfiler(appStartMetrics);
     return true;
   }
 
@@ -72,82 +78,115 @@ public final class SentryPerformanceProvider extends ContentProvider
 
   @Nullable
   @Override
-  public Cursor query(
-      @NotNull Uri uri,
-      @Nullable String[] projection,
-      @Nullable String selection,
-      @Nullable String[] selectionArgs,
-      @Nullable String sortOrder) {
-    return null;
-  }
-
-  @Nullable
-  @Override
   public String getType(@NotNull Uri uri) {
     return null;
   }
 
-  @Nullable
   @Override
-  public Uri insert(@NotNull Uri uri, @Nullable ContentValues values) {
-    return null;
-  }
-
-  @Override
-  public int delete(
-      @NotNull Uri uri, @Nullable String selection, @Nullable String[] selectionArgs) {
-    return 0;
-  }
-
-  @Override
-  public int update(
-      @NotNull Uri uri,
-      @Nullable ContentValues values,
-      @Nullable String selection,
-      @Nullable String[] selectionArgs) {
-    return 0;
-  }
-
-  @TestOnly
-  static void setAppStartTime(final long appStartMillisLong, final @NotNull Date appStartTimeDate) {
-    appStartMillis = appStartMillisLong;
-    appStartTime = appStartTimeDate;
-  }
-
-  @Override
-  public void onActivityCreated(@NotNull Activity activity, @Nullable Bundle savedInstanceState) {
-    // Hybrid Apps like RN or Flutter init the Android SDK after the MainActivity of the App
-    // has been created, and some frameworks overwrites the behaviour of activity lifecycle
-    // or it's already too late to get the callback for the very first Activity, hence we
-    // register the ActivityLifecycleCallbacks here, since this Provider is always run first.
-    if (!firstActivityCreated) {
-      // if Activity has savedInstanceState then its a warm start
-      // https://developer.android.com/topic/performance/vitals/launch-time#warm
-      final boolean coldStart = savedInstanceState == null;
-      AppStartState.getInstance().setColdStart(coldStart);
-
-      if (application != null) {
-        application.unregisterActivityLifecycleCallbacks(this);
+  public void shutdown() {
+    try (final @NotNull ISentryLifecycleToken ignored = AppStartMetrics.staticLock.acquire()) {
+      final @Nullable ITransactionProfiler appStartProfiler =
+          AppStartMetrics.getInstance().getAppStartProfiler();
+      if (appStartProfiler != null) {
+        appStartProfiler.close();
       }
-      firstActivityCreated = true;
     }
   }
 
-  @Override
-  public void onActivityStarted(@NotNull Activity activity) {}
+  private void launchAppStartProfiler(final @NotNull AppStartMetrics appStartMetrics) {
+    final @Nullable Context context = getContext();
 
-  @Override
-  public void onActivityResumed(@NotNull Activity activity) {}
+    if (context == null) {
+      logger.log(SentryLevel.FATAL, "App. Context from ContentProvider is null");
+      return;
+    }
 
-  @Override
-  public void onActivityPaused(@NotNull Activity activity) {}
+    final @NotNull File cacheDir = AndroidOptionsInitializer.getCacheDir(context);
+    final @NotNull File configFile = new File(cacheDir, APP_START_PROFILING_CONFIG_FILE_NAME);
 
-  @Override
-  public void onActivityStopped(@NotNull Activity activity) {}
+    // No config exists: app start profiling is not enabled
+    if (!configFile.exists() || !configFile.canRead()) {
+      return;
+    }
 
-  @Override
-  public void onActivitySaveInstanceState(@NotNull Activity activity, @NotNull Bundle outState) {}
+    try (final @NotNull Reader reader =
+            new BufferedReader(new InputStreamReader(new FileInputStream(configFile)))) {
+      final @Nullable SentryAppStartProfilingOptions profilingOptions =
+          new JsonSerializer(SentryOptions.empty())
+              .deserialize(reader, SentryAppStartProfilingOptions.class);
 
-  @Override
-  public void onActivityDestroyed(@NotNull Activity activity) {}
+      if (profilingOptions == null) {
+        logger.log(
+            SentryLevel.WARNING,
+            "Unable to deserialize the SentryAppStartProfilingOptions. App start profiling will not start.");
+        return;
+      }
+
+      if (!profilingOptions.isProfilingEnabled()) {
+        logger.log(
+            SentryLevel.INFO, "Profiling is not enabled. App start profiling will not start.");
+        return;
+      }
+
+      final @NotNull TracesSamplingDecision appStartSamplingDecision =
+          new TracesSamplingDecision(
+              profilingOptions.isTraceSampled(),
+              profilingOptions.getTraceSampleRate(),
+              profilingOptions.isProfileSampled(),
+              profilingOptions.getProfileSampleRate());
+      // We store any sampling decision, so we can respect it when the first transaction starts
+      appStartMetrics.setAppStartSamplingDecision(appStartSamplingDecision);
+
+      if (!(appStartSamplingDecision.getProfileSampled()
+          && appStartSamplingDecision.getSampled())) {
+        logger.log(SentryLevel.DEBUG, "App start profiling was not sampled. It will not start.");
+        return;
+      }
+      logger.log(SentryLevel.DEBUG, "App start profiling started.");
+
+      final @NotNull ITransactionProfiler appStartProfiler =
+          new AndroidTransactionProfiler(
+              context,
+              buildInfoProvider,
+              new SentryFrameMetricsCollector(context, logger, buildInfoProvider),
+              logger,
+              profilingOptions.getProfilingTracesDirPath(),
+              profilingOptions.isProfilingEnabled(),
+              profilingOptions.getProfilingTracesHz(),
+              new SentryExecutorService());
+      appStartMetrics.setAppStartProfiler(appStartProfiler);
+      appStartProfiler.start();
+
+    } catch (FileNotFoundException e) {
+      logger.log(SentryLevel.ERROR, "App start profiling config file not found. ", e);
+    } catch (Throwable e) {
+      logger.log(SentryLevel.ERROR, "Error reading app start profiling config file. ", e);
+    }
+  }
+
+  @SuppressLint("NewApi")
+  private void onAppLaunched(
+      final @Nullable Context context, final @NotNull AppStartMetrics appStartMetrics) {
+
+    // sdk-init uses static field init as start time
+    final @NotNull TimeSpan sdkInitTimeSpan = appStartMetrics.getSdkInitTimeSpan();
+    sdkInitTimeSpan.setStartedAt(sdkInitMillis);
+
+    // performance v2: Uses Process.getStartUptimeMillis()
+    // requires API level 24+
+    if (buildInfoProvider.getSdkInfoVersion() < android.os.Build.VERSION_CODES.N) {
+      return;
+    }
+
+    if (context instanceof Application) {
+      app = (Application) context;
+    }
+    if (app == null) {
+      return;
+    }
+
+    final @NotNull TimeSpan appStartTimespan = appStartMetrics.getAppStartTimeSpan();
+    appStartTimespan.setStartedAt(Process.getStartUptimeMillis());
+    appStartMetrics.registerApplicationForegroundCheck(app);
+  }
 }

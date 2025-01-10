@@ -1,10 +1,13 @@
 package io.sentry.spring.jakarta.webflux;
 
 import com.jakewharton.nopen.annotation.Open;
-import io.sentry.IHub;
+import io.sentry.IScopes;
 import io.sentry.protocol.Request;
 import io.sentry.util.HttpUtils;
 import io.sentry.util.Objects;
+import io.sentry.util.UrlUtils;
+import java.net.URI;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,23 +20,28 @@ import org.springframework.http.server.reactive.ServerHttpRequest;
 @Open
 @ApiStatus.Experimental
 public class SentryRequestResolver {
-  private final @NotNull IHub hub;
+  private final @NotNull IScopes scopes;
 
-  public SentryRequestResolver(final @NotNull IHub hub) {
-    this.hub = Objects.requireNonNull(hub, "options is required");
+  public SentryRequestResolver(final @NotNull IScopes scopes) {
+    this.scopes = Objects.requireNonNull(scopes, "scopes are required");
   }
 
   public @NotNull Request resolveSentryRequest(final @NotNull ServerHttpRequest httpRequest) {
     final Request sentryRequest = new Request();
     final String methodName =
-      httpRequest.getMethod() != null ? httpRequest.getMethod().name() : "unknown";
+        httpRequest.getMethod() != null ? httpRequest.getMethod().name() : "unknown";
     sentryRequest.setMethod(methodName);
-    sentryRequest.setQueryString(httpRequest.getURI().getQuery());
-    sentryRequest.setUrl(httpRequest.getURI().toString());
+    final @NotNull URI uri = httpRequest.getURI();
+    final @NotNull UrlUtils.UrlDetails urlDetails = UrlUtils.parse(uri.toString());
+    urlDetails.applyToRequest(sentryRequest);
     sentryRequest.setHeaders(resolveHeadersMap(httpRequest.getHeaders()));
 
-    if (hub.getOptions().isSendDefaultPii()) {
-      sentryRequest.setCookies(toString(httpRequest.getHeaders().get("Cookies")));
+    if (scopes.getOptions().isSendDefaultPii()) {
+      String headerName = HttpUtils.COOKIE_HEADER_NAME;
+      sentryRequest.setCookies(
+          toString(
+              HttpUtils.filterOutSecurityCookiesFromHeader(
+                  httpRequest.getHeaders().get(headerName), headerName, Collections.emptyList())));
     }
     return sentryRequest;
   }
@@ -43,9 +51,14 @@ public class SentryRequestResolver {
     final Map<String, String> headersMap = new HashMap<>();
     for (Map.Entry<String, List<String>> entry : request.entrySet()) {
       // do not copy personal information identifiable headers
-      if (hub.getOptions().isSendDefaultPii()
-          || !HttpUtils.containsSensitiveHeader(entry.getKey())) {
-        headersMap.put(entry.getKey(), toString(entry.getValue()));
+      String headerName = entry.getKey();
+      if (scopes.getOptions().isSendDefaultPii()
+          || !HttpUtils.containsSensitiveHeader(headerName)) {
+        headersMap.put(
+            headerName,
+            toString(
+                HttpUtils.filterOutSecurityCookiesFromHeader(
+                    entry.getValue(), headerName, Collections.emptyList())));
       }
     }
     return headersMap;

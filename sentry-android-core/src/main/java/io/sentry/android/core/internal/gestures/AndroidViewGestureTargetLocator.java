@@ -5,6 +5,7 @@ import android.view.View;
 import android.widget.AbsListView;
 import android.widget.ScrollView;
 import androidx.core.view.ScrollingView;
+import io.sentry.android.core.internal.util.ClassUtil;
 import io.sentry.internal.gestures.GestureTargetLocator;
 import io.sentry.internal.gestures.UiElement;
 import org.jetbrains.annotations.ApiStatus;
@@ -13,6 +14,8 @@ import org.jetbrains.annotations.Nullable;
 
 @ApiStatus.Internal
 public final class AndroidViewGestureTargetLocator implements GestureTargetLocator {
+
+  private static final String ORIGIN = "old_view_system";
 
   private final boolean isAndroidXAvailable;
   private final int[] coordinates = new int[2];
@@ -42,11 +45,8 @@ public final class AndroidViewGestureTargetLocator implements GestureTargetLocat
   private UiElement createUiElement(final @NotNull View targetView) {
     try {
       final String resourceName = ViewUtils.getResourceId(targetView);
-      @Nullable String className = targetView.getClass().getCanonicalName();
-      if (className == null) {
-        className = targetView.getClass().getSimpleName();
-      }
-      return new UiElement(targetView, className, resourceName, null);
+      @Nullable String className = ClassUtil.getClassName(targetView);
+      return new UiElement(targetView, className, resourceName, null, ORIGIN);
     } catch (Resources.NotFoundException ignored) {
       return null;
     }

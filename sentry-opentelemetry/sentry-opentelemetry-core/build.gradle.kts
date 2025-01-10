@@ -20,9 +20,16 @@ tasks.withType<KotlinCompile>().configureEach {
 
 dependencies {
     compileOnly(projects.sentry)
+    /**
+     * sentryOpentelemetryBootstrap cannot be an implementation dependency
+     * because getSentryOpentelemetryCore is loaded into the agent classloader
+     * and sentryOpentelemetryBootstrap should be in the bootstrap classloader.
+     */
+    compileOnly(projects.sentryOpentelemetry.sentryOpentelemetryBootstrap)
 
-    compileOnly(Config.Libs.OpenTelemetry.otelSdk)
+    implementation(Config.Libs.OpenTelemetry.otelSdk)
     compileOnly(Config.Libs.OpenTelemetry.otelSemconv)
+    compileOnly(Config.Libs.OpenTelemetry.otelSemconvIncubating)
 
     compileOnly(Config.CompileOnly.nopen)
     errorprone(Config.CompileOnly.nopenChecker)
@@ -31,6 +38,7 @@ dependencies {
     errorprone(Config.CompileOnly.errorProneNullAway)
 
     // tests
+    testImplementation(projects.sentryOpentelemetry.sentryOpentelemetryBootstrap)
     testImplementation(projects.sentryTestSupport)
     testImplementation(kotlin(Config.kotlinStdLib))
     testImplementation(Config.TestLibs.kotlinTestJunit)
@@ -39,6 +47,7 @@ dependencies {
 
     testImplementation(Config.Libs.OpenTelemetry.otelSdk)
     testImplementation(Config.Libs.OpenTelemetry.otelSemconv)
+    testImplementation(Config.Libs.OpenTelemetry.otelSemconvIncubating)
 }
 
 configure<SourceSetContainer> {
@@ -53,8 +62,8 @@ jacoco {
 
 tasks.jacocoTestReport {
     reports {
-        xml.isEnabled = true
-        html.isEnabled = false
+        xml.required.set(true)
+        html.required.set(false)
     }
 }
 

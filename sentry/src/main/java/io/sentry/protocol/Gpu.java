@@ -2,11 +2,12 @@ package io.sentry.protocol;
 
 import io.sentry.ILogger;
 import io.sentry.JsonDeserializer;
-import io.sentry.JsonObjectReader;
-import io.sentry.JsonObjectWriter;
 import io.sentry.JsonSerializable;
 import io.sentry.JsonUnknown;
+import io.sentry.ObjectReader;
+import io.sentry.ObjectWriter;
 import io.sentry.util.CollectionUtils;
+import io.sentry.util.Objects;
 import io.sentry.vendor.gson.stream.JsonToken;
 import java.io.IOException;
 import java.util.Map;
@@ -130,6 +131,36 @@ public final class Gpu implements JsonUnknown, JsonSerializable {
     this.npotSupport = npotSupport;
   }
 
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    Gpu gpu = (Gpu) o;
+    return Objects.equals(name, gpu.name)
+        && Objects.equals(id, gpu.id)
+        && Objects.equals(vendorId, gpu.vendorId)
+        && Objects.equals(vendorName, gpu.vendorName)
+        && Objects.equals(memorySize, gpu.memorySize)
+        && Objects.equals(apiType, gpu.apiType)
+        && Objects.equals(multiThreadedRendering, gpu.multiThreadedRendering)
+        && Objects.equals(version, gpu.version)
+        && Objects.equals(npotSupport, gpu.npotSupport);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(
+        name,
+        id,
+        vendorId,
+        vendorName,
+        memorySize,
+        apiType,
+        multiThreadedRendering,
+        version,
+        npotSupport);
+  }
+
   // region JsonSerializable
 
   public static final class JsonKeys {
@@ -145,7 +176,7 @@ public final class Gpu implements JsonUnknown, JsonSerializable {
   }
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     if (name != null) {
@@ -198,7 +229,7 @@ public final class Gpu implements JsonUnknown, JsonSerializable {
 
   public static final class Deserializer implements JsonDeserializer<Gpu> {
     @Override
-    public @NotNull Gpu deserialize(@NotNull JsonObjectReader reader, @NotNull ILogger logger)
+    public @NotNull Gpu deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
         throws Exception {
       reader.beginObject();
       Gpu gpu = new Gpu();

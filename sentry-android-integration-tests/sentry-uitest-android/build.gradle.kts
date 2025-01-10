@@ -14,7 +14,7 @@ android {
     namespace = "io.sentry.uitest.android"
 
     defaultConfig {
-        minSdk = Config.Android.minSdkVersionCompose
+        minSdk = Config.Android.minSdkVersion
         targetSdk = Config.Android.targetSdkVersion
         versionCode = 1
         versionName = "1.0.0"
@@ -26,6 +26,7 @@ android {
         // This doesn't work on some devices with Android 11+. Clearing package data resets permissions.
         // Check the readme for more info.
         testInstrumentationRunnerArguments["clearPackageData"] = "true"
+        buildConfigField("String", "ENVIRONMENT", "\"${System.getProperty("environment", "")}\"")
     }
 
     testOptions {
@@ -40,7 +41,7 @@ android {
     }
 
     composeOptions {
-        kotlinCompilerExtensionVersion = Config.composeVersion
+        kotlinCompilerExtensionVersion = Config.androidComposeCompilerVersion
     }
 
     signingConfigs {
@@ -65,6 +66,7 @@ android {
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("debug") // to be able to run release mode
+            testProguardFiles("proguard-rules.pro")
         }
     }
 
@@ -87,12 +89,19 @@ android {
     }
 }
 
+val applySentryIntegrations = System.getenv("APPLY_SENTRY_INTEGRATIONS")?.toBoolean() ?: true
+
 dependencies {
 
     implementation(kotlin(Config.kotlinStdLib, org.jetbrains.kotlin.config.KotlinCompilerVersion.VERSION))
 
-    implementation(projects.sentryAndroid)
-    implementation(projects.sentryCompose)
+    if (applySentryIntegrations) {
+        implementation(projects.sentryAndroid)
+        implementation(projects.sentryCompose)
+        implementation(projects.sentryComposeHelper)
+    } else {
+        implementation(projects.sentryAndroidCore)
+    }
     implementation(Config.Libs.appCompat)
     implementation(Config.Libs.androidxCore)
     implementation(Config.Libs.composeActivity)
@@ -101,6 +110,7 @@ dependencies {
     implementation(Config.Libs.androidxRecylerView)
     implementation(Config.Libs.constraintLayout)
     implementation(Config.TestLibs.espressoIdlingResource)
+    implementation(Config.Libs.leakCanary)
 
     compileOnly(Config.CompileOnly.nopen)
     errorprone(Config.CompileOnly.nopenChecker)
@@ -115,6 +125,8 @@ dependencies {
     androidTestImplementation(Config.TestLibs.androidxTestCoreKtx)
     androidTestImplementation(Config.TestLibs.mockWebserver)
     androidTestImplementation(Config.TestLibs.androidxJunit)
+    androidTestImplementation(Config.TestLibs.leakCanaryInstrumentation)
+    androidTestImplementation(Config.TestLibs.awaitility3)
     androidTestUtil(Config.TestLibs.androidxTestOrchestrator)
 }
 

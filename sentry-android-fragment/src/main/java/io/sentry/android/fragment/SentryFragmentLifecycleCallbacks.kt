@@ -8,28 +8,30 @@ import androidx.fragment.app.FragmentManager
 import androidx.fragment.app.FragmentManager.FragmentLifecycleCallbacks
 import io.sentry.Breadcrumb
 import io.sentry.Hint
-import io.sentry.HubAdapter
-import io.sentry.IHub
+import io.sentry.IScopes
 import io.sentry.ISpan
+import io.sentry.ScopesAdapter
 import io.sentry.SentryLevel.INFO
 import io.sentry.SpanStatus
 import io.sentry.TypeCheckHint.ANDROID_FRAGMENT
 import java.util.WeakHashMap
 
+private const val TRACE_ORIGIN = "auto.ui.fragment"
+
 @Suppress("TooManyFunctions")
 class SentryFragmentLifecycleCallbacks(
-    private val hub: IHub = HubAdapter.getInstance(),
+    private val scopes: IScopes = ScopesAdapter.getInstance(),
     val filterFragmentLifecycleBreadcrumbs: Set<FragmentLifecycleState>,
     val enableAutoFragmentLifecycleTracing: Boolean
 ) : FragmentLifecycleCallbacks() {
 
     constructor(
-        hub: IHub,
+        scopes: IScopes,
         enableFragmentLifecycleBreadcrumbs: Boolean,
         enableAutoFragmentLifecycleTracing: Boolean
     ) : this(
-        hub = hub,
-        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.values().toSet()
+        scopes = scopes,
+        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.states
             .takeIf { enableFragmentLifecycleBreadcrumbs }
             .orEmpty(),
         enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing
@@ -39,14 +41,14 @@ class SentryFragmentLifecycleCallbacks(
         enableFragmentLifecycleBreadcrumbs: Boolean = true,
         enableAutoFragmentLifecycleTracing: Boolean = false
     ) : this(
-        hub = HubAdapter.getInstance(),
-        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.values().toSet()
+        scopes = ScopesAdapter.getInstance(),
+        filterFragmentLifecycleBreadcrumbs = FragmentLifecycleState.states
             .takeIf { enableFragmentLifecycleBreadcrumbs }
             .orEmpty(),
         enableAutoFragmentLifecycleTracing = enableAutoFragmentLifecycleTracing
     )
 
-    private val isPerformanceEnabled get() = hub.options.isTracingEnabled && enableAutoFragmentLifecycleTracing
+    private val isPerformanceEnabled get() = scopes.options.isTracingEnabled && enableAutoFragmentLifecycleTracing
 
     private val fragmentsWithOngoingTransactions = WeakHashMap<Fragment, ISpan>()
 
@@ -79,6 +81,9 @@ class SentryFragmentLifecycleCallbacks(
         // we only start the tracing for the fragment if the fragment has been added to its activity
         // and not only to the backstack
         if (fragment.isAdded) {
+            if (scopes.options.isEnableScreenTracking) {
+                scopes.configureScope { it.screen = getFragmentName(fragment) }
+            }
             startTracing(fragment)
         }
     }
@@ -94,12 +99,13 @@ class SentryFragmentLifecycleCallbacks(
 
     override fun onFragmentStarted(fragmentManager: FragmentManager, fragment: Fragment) {
         addBreadcrumb(fragment, FragmentLifecycleState.STARTED)
+
+        // ViewPager2 locks background fragments to STARTED state
+        stopTracing(fragment)
     }
 
     override fun onFragmentResumed(fragmentManager: FragmentManager, fragment: Fragment) {
         addBreadcrumb(fragment, FragmentLifecycleState.RESUMED)
-
-        stopTracing(fragment)
     }
 
     override fun onFragmentPaused(fragmentManager: FragmentManager, fragment: Fragment) {
@@ -139,7 +145,7 @@ class SentryFragmentLifecycleCallbacks(
         val hint = Hint()
             .also { it.set(ANDROID_FRAGMENT, fragment) }
 
-        hub.addBreadcrumb(breadcrumb, hint)
+        scopes.addBreadcrumb(breadcrumb, hint)
     }
 
     private fun getFragmentName(fragment: Fragment): String {
@@ -155,7 +161,7 @@ class SentryFragmentLifecycleCallbacks(
         }
 
         var transaction: ISpan? = null
-        hub.configureScope {
+        scopes.configureScope {
             transaction = it.transaction
         }
 
@@ -164,6 +170,7 @@ class SentryFragmentLifecycleCallbacks(
 
         span?.let {
             fragmentsWithOngoingTransactions[fragment] = it
+            it.spanContext.origin = TRACE_ORIGIN
         }
     }
 

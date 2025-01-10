@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CopyOnWriteArraySet;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -40,6 +41,22 @@ public final class ExternalOptions {
       new CopyOnWriteArraySet<>();
   private @Nullable Boolean printUncaughtStackTrace;
   private @Nullable Boolean sendClientReports;
+  private @NotNull Set<String> bundleIds = new CopyOnWriteArraySet<>();
+  private @Nullable Boolean enabled;
+  private @Nullable Boolean enablePrettySerializationOutput;
+  private @Nullable Boolean enableSpotlight;
+  private @Nullable String spotlightConnectionUrl;
+
+  private @Nullable List<String> ignoredCheckIns;
+  private @Nullable List<String> ignoredTransactions;
+
+  private @Nullable Boolean sendModules;
+  private @Nullable Boolean sendDefaultPii;
+  private @Nullable Boolean enableBackpressureHandling;
+  private @Nullable Boolean globalHubMode;
+  private @Nullable Boolean forceInit;
+
+  private @Nullable SentryOptions.Cron cron;
 
   @SuppressWarnings("unchecked")
   public static @NotNull ExternalOptions from(
@@ -59,6 +76,7 @@ public final class ExternalOptions {
     options.setDebug(propertiesProvider.getBooleanProperty("debug"));
     options.setEnableDeduplication(propertiesProvider.getBooleanProperty("enable-deduplication"));
     options.setSendClientReports(propertiesProvider.getBooleanProperty("send-client-reports"));
+    options.setForceInit(propertiesProvider.getBooleanProperty("force-init"));
     final String maxRequestBodySize = propertiesProvider.getProperty("max-request-body-size");
     if (maxRequestBodySize != null) {
       options.setMaxRequestBodySize(
@@ -107,7 +125,26 @@ public final class ExternalOptions {
       options.addContextTag(contextTag);
     }
     options.setProguardUuid(propertiesProvider.getProperty("proguard-uuid"));
+    for (final String bundleId : propertiesProvider.getList("bundle-ids")) {
+      options.addBundleId(bundleId);
+    }
     options.setIdleTimeout(propertiesProvider.getLongProperty("idle-timeout"));
+
+    options.setEnabled(propertiesProvider.getBooleanProperty("enabled"));
+
+    options.setEnablePrettySerializationOutput(
+        propertiesProvider.getBooleanProperty("enable-pretty-serialization-output"));
+
+    options.setSendModules(propertiesProvider.getBooleanProperty("send-modules"));
+    options.setSendDefaultPii(propertiesProvider.getBooleanProperty("send-default-pii"));
+
+    options.setIgnoredCheckIns(propertiesProvider.getList("ignored-checkins"));
+    options.setIgnoredTransactions(propertiesProvider.getList("ignored-transactions"));
+
+    options.setEnableBackpressureHandling(
+        propertiesProvider.getBooleanProperty("enable-backpressure-handling"));
+
+    options.setGlobalHubMode(propertiesProvider.getBooleanProperty("global-hub-mode"));
 
     for (final String ignoredExceptionType :
         propertiesProvider.getList("ignored-exceptions-for-type")) {
@@ -130,6 +167,35 @@ public final class ExternalOptions {
             ignoredExceptionType);
       }
     }
+
+    final Long cronDefaultCheckinMargin =
+        propertiesProvider.getLongProperty("cron.default-checkin-margin");
+    final Long cronDefaultMaxRuntime =
+        propertiesProvider.getLongProperty("cron.default-max-runtime");
+    final String cronDefaultTimezone = propertiesProvider.getProperty("cron.default-timezone");
+    final Long cronDefaultFailureIssueThreshold =
+        propertiesProvider.getLongProperty("cron.default-failure-issue-threshold");
+    final Long cronDefaultRecoveryThreshold =
+        propertiesProvider.getLongProperty("cron.default-recovery-threshold");
+
+    if (cronDefaultCheckinMargin != null
+        || cronDefaultMaxRuntime != null
+        || cronDefaultTimezone != null
+        || cronDefaultFailureIssueThreshold != null
+        || cronDefaultRecoveryThreshold != null) {
+      SentryOptions.Cron cron = new SentryOptions.Cron();
+      cron.setDefaultCheckinMargin(cronDefaultCheckinMargin);
+      cron.setDefaultMaxRuntime(cronDefaultMaxRuntime);
+      cron.setDefaultTimezone(cronDefaultTimezone);
+      cron.setDefaultFailureIssueThreshold(cronDefaultFailureIssueThreshold);
+      cron.setDefaultRecoveryThreshold(cronDefaultRecoveryThreshold);
+
+      options.setCron(cron);
+    }
+
+    options.setEnableSpotlight(propertiesProvider.getBooleanProperty("enable-spotlight"));
+    options.setSpotlightConnectionUrl(propertiesProvider.getProperty("spotlight-connection-url"));
+
     return options;
   }
 
@@ -180,11 +246,6 @@ public final class ExternalOptions {
   public void setEnableUncaughtExceptionHandler(
       final @Nullable Boolean enableUncaughtExceptionHandler) {
     this.enableUncaughtExceptionHandler = enableUncaughtExceptionHandler;
-  }
-
-  @Deprecated
-  public @Nullable List<String> getTracingOrigins() {
-    return tracePropagationTargets;
   }
 
   public @Nullable List<String> getTracePropagationTargets() {
@@ -275,12 +336,6 @@ public final class ExternalOptions {
     inAppExcludes.add(exclude);
   }
 
-  @Deprecated
-  @SuppressWarnings("InlineMeSuggester")
-  public void addTracingOrigin(final @NotNull String tracingOrigin) {
-    this.addTracePropagationTarget(tracingOrigin);
-  }
-
   public void addTracePropagationTarget(final @NotNull String tracePropagationTarget) {
     if (tracePropagationTargets == null) {
       tracePropagationTargets = new CopyOnWriteArrayList<>();
@@ -324,5 +379,121 @@ public final class ExternalOptions {
 
   public void setSendClientReports(final @Nullable Boolean sendClientReports) {
     this.sendClientReports = sendClientReports;
+  }
+
+  public @NotNull Set<String> getBundleIds() {
+    return bundleIds;
+  }
+
+  public void addBundleId(final @NotNull String bundleId) {
+    bundleIds.add(bundleId);
+  }
+
+  public @Nullable Boolean isEnabled() {
+    return enabled;
+  }
+
+  public void setEnabled(final @Nullable Boolean enabled) {
+    this.enabled = enabled;
+  }
+
+  public @Nullable Boolean isEnablePrettySerializationOutput() {
+    return enablePrettySerializationOutput;
+  }
+
+  public void setEnablePrettySerializationOutput(
+      final @Nullable Boolean enablePrettySerializationOutput) {
+    this.enablePrettySerializationOutput = enablePrettySerializationOutput;
+  }
+
+  public @Nullable Boolean isSendModules() {
+    return sendModules;
+  }
+
+  public void setSendModules(final @Nullable Boolean sendModules) {
+    this.sendModules = sendModules;
+  }
+
+  public @Nullable Boolean isSendDefaultPii() {
+    return sendDefaultPii;
+  }
+
+  public void setSendDefaultPii(final @Nullable Boolean sendDefaultPii) {
+    this.sendDefaultPii = sendDefaultPii;
+  }
+
+  @ApiStatus.Experimental
+  public void setIgnoredCheckIns(final @Nullable List<String> ignoredCheckIns) {
+    this.ignoredCheckIns = ignoredCheckIns;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable List<String> getIgnoredCheckIns() {
+    return ignoredCheckIns;
+  }
+
+  public void setIgnoredTransactions(final @Nullable List<String> ignoredTransactions) {
+    this.ignoredTransactions = ignoredTransactions;
+  }
+
+  public @Nullable List<String> getIgnoredTransactions() {
+    return ignoredTransactions;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableBackpressureHandling(final @Nullable Boolean enableBackpressureHandling) {
+    this.enableBackpressureHandling = enableBackpressureHandling;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable Boolean isEnableBackpressureHandling() {
+    return enableBackpressureHandling;
+  }
+
+  public void setGlobalHubMode(final @Nullable Boolean globalHubMode) {
+    this.globalHubMode = globalHubMode;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable Boolean isGlobalHubMode() {
+    return globalHubMode;
+  }
+
+  public void setForceInit(final @Nullable Boolean forceInit) {
+    this.forceInit = forceInit;
+  }
+
+  public @Nullable Boolean isForceInit() {
+    return forceInit;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable SentryOptions.Cron getCron() {
+    return cron;
+  }
+
+  @ApiStatus.Experimental
+  public void setCron(final @Nullable SentryOptions.Cron cron) {
+    this.cron = cron;
+  }
+
+  @ApiStatus.Experimental
+  public void setEnableSpotlight(final @Nullable Boolean enableSpotlight) {
+    this.enableSpotlight = enableSpotlight;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable Boolean isEnableSpotlight() {
+    return enableSpotlight;
+  }
+
+  @ApiStatus.Experimental
+  public @Nullable String getSpotlightConnectionUrl() {
+    return spotlightConnectionUrl;
+  }
+
+  @ApiStatus.Experimental
+  public void setSpotlightConnectionUrl(final @Nullable String spotlightConnectionUrl) {
+    this.spotlightConnectionUrl = spotlightConnectionUrl;
   }
 }

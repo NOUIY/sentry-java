@@ -6,6 +6,9 @@ import io.sentry.ILogger
 import io.sentry.JsonObjectReader
 import io.sentry.JsonObjectWriter
 import io.sentry.JsonSerializable
+import io.sentry.SentryIntegrationPackageStorage
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 import java.io.StringReader
@@ -35,11 +38,23 @@ class SentryTransactionSerializationTest {
     }
     private val fixture = Fixture()
 
+    @Before
+    fun setup() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
+
+    @After
+    fun teardown() {
+        SentryIntegrationPackageStorage.getInstance().clearStorage()
+    }
+
     @Test
     fun serialize() {
         val expected = sanitizedFile("json/sentry_transaction.json")
         val actual = serialize(fixture.getSut())
         assertEquals(expected, actual)
+        // There are 1 measurement from the span and 2 from the transaction
+        assertEquals(3, fixture.getSut().measurements.size)
     }
 
     @Test

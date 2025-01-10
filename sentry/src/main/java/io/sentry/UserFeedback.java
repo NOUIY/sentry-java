@@ -147,7 +147,7 @@ public final class UserFeedback implements JsonUnknown, JsonSerializable {
   // JsonSerializable
 
   @Override
-  public void serialize(@NotNull JsonObjectWriter writer, @NotNull ILogger logger)
+  public void serialize(final @NotNull ObjectWriter writer, final @NotNull ILogger logger)
       throws IOException {
     writer.beginObject();
     writer.name(JsonKeys.EVENT_ID);
@@ -174,8 +174,8 @@ public final class UserFeedback implements JsonUnknown, JsonSerializable {
 
   public static final class Deserializer implements JsonDeserializer<UserFeedback> {
     @Override
-    public @NotNull UserFeedback deserialize(
-        @NotNull JsonObjectReader reader, @NotNull ILogger logger) throws Exception {
+    public @NotNull UserFeedback deserialize(@NotNull ObjectReader reader, @NotNull ILogger logger)
+        throws Exception {
       SentryId sentryId = null;
       String name = null;
       String email = null;

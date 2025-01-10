@@ -1,10 +1,11 @@
 package io.sentry.spring.webflux;
 
+import static io.sentry.TypeCheckHint.WEBFLUX_EXCEPTION_HANDLER_EXCHANGE;
 import static io.sentry.TypeCheckHint.WEBFLUX_EXCEPTION_HANDLER_REQUEST;
 import static io.sentry.TypeCheckHint.WEBFLUX_EXCEPTION_HANDLER_RESPONSE;
 
 import io.sentry.Hint;
-import io.sentry.IHub;
+import io.sentry.IScopes;
 import io.sentry.SentryEvent;
 import io.sentry.SentryLevel;
 import io.sentry.exception.ExceptionMechanismException;
@@ -24,10 +25,11 @@ import reactor.core.publisher.Mono;
 // at -1
 @ApiStatus.Experimental
 public final class SentryWebExceptionHandler implements WebExceptionHandler {
-  private final @NotNull IHub hub;
+  public static final String MECHANISM_TYPE = "Spring5WebFluxExceptionResolver";
+  private final @NotNull IScopes scopes;
 
-  public SentryWebExceptionHandler(final @NotNull IHub hub) {
-    this.hub = Objects.requireNonNull(hub, "hub is required");
+  public SentryWebExceptionHandler(final @NotNull IScopes scopes) {
+    this.scopes = Objects.requireNonNull(scopes, "scopes are required");
   }
 
   @Override
@@ -35,7 +37,7 @@ public final class SentryWebExceptionHandler implements WebExceptionHandler {
       final @NotNull ServerWebExchange serverWebExchange, final @NotNull Throwable ex) {
     if (!(ex instanceof ResponseStatusException)) {
       final Mechanism mechanism = new Mechanism();
-      mechanism.setType("SentryWebExceptionHandler");
+      mechanism.setType(MECHANISM_TYPE);
       mechanism.setHandled(false);
       final Throwable throwable =
           new ExceptionMechanismException(mechanism, ex, Thread.currentThread());
@@ -46,8 +48,9 @@ public final class SentryWebExceptionHandler implements WebExceptionHandler {
       final Hint hint = new Hint();
       hint.set(WEBFLUX_EXCEPTION_HANDLER_REQUEST, serverWebExchange.getRequest());
       hint.set(WEBFLUX_EXCEPTION_HANDLER_RESPONSE, serverWebExchange.getResponse());
+      hint.set(WEBFLUX_EXCEPTION_HANDLER_EXCHANGE, serverWebExchange);
 
-      hub.captureEvent(event, hint);
+      scopes.captureEvent(event, hint);
     }
     return Mono.error(ex);
   }
