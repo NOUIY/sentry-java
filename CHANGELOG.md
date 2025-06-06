@@ -7,6 +7,12 @@
 - Send UI Profiling app start chunk when it finishes ([#4423](https://github.com/getsentry/sentry-java/pull/4423))
 - Republish Javadoc [#4457](https://github.com/getsentry/sentry-java/pull/4457)
 
+### Dependencies
+
+- Bump Gradle from v8.14.1 to v8.14.2 ([#106](https://github.com/NOUIY/sentry-java/pull/106))
+  - [changelog](https://github.com/gradle/gradle/blob/master/CHANGELOG.md#v8142)
+  - [diff](https://github.com/gradle/gradle/compare/v8.14.1...v8.14.2)
+
 ## 8.13.2
 
 ### Fixes
