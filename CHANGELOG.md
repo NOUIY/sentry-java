@@ -2,10 +2,34 @@
 
 ## Unreleased
 
+### Features
+
+- Add New User Feedback form ([#4384](https://github.com/getsentry/sentry-java/pull/4384))
+    - We now introduce SentryUserFeedbackDialog, which extends AlertDialog, inheriting the show() and cancel() methods, among others.
+      To use it, just instantiate it and call show() on the instance (Sentry must be previously initialized).
+      For customization options, please check the [User Feedback documentation](https://docs.sentry.io/platforms/android/user-feedback/configuration/).
+      ```java
+      import io.sentry.android.core.SentryUserFeedbackDialog;
+      
+      new SentryUserFeedbackDialog.Builder(context).create().show();
+      ```
+      ```kotlin
+      import io.sentry.android.core.SentryUserFeedbackDialog
+    
+      SentryUserFeedbackDialog.Builder(context).create().show()
+      ```
+
+## 8.13.3
+
 ### Fixes
 
 - Send UI Profiling app start chunk when it finishes ([#4423](https://github.com/getsentry/sentry-java/pull/4423))
 - Republish Javadoc [#4457](https://github.com/getsentry/sentry-java/pull/4457)
+- Finalize `OkHttpEvent` even if no active span in `SentryOkHttpInterceptor` [#4469](https://github.com/getsentry/sentry-java/pull/4469)
+- Session Replay: Do not capture current replay for cached events from the past ([#4474](https://github.com/getsentry/sentry-java/pull/4474))
+- Session Replay: Correctly capture Dialogs and non full-sized windows ([#4354](https://github.com/getsentry/sentry-java/pull/4354))
+- Session Replay: Fix inconsistent `segment_id` ([#4471](https://github.com/getsentry/sentry-java/pull/4471))
+- Session Replay: Fix crash on devices with the Unisoc/Spreadtrum T606 chipset ([#4477](https://github.com/getsentry/sentry-java/pull/4477))
 
 ## 8.13.2
 
