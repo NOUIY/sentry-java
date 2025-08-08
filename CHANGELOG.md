@@ -27,6 +27,12 @@
 - Fix abstract method error in `SentrySupportSQLiteDatabase` ([#4597](https://github.com/getsentry/sentry-java/pull/4597))
 - Ensure frame metrics listeners are registered/unregistered on the main thread ([#4582](https://github.com/getsentry/sentry-java/pull/4582))
 
+### Dependencies
+
+- Bump Gradle from v8.14.3 to v9.0.0 ([#120](https://github.com/NOUIY/sentry-java/pull/120))
+  - [changelog](https://github.com/gradle/gradle/blob/master/CHANGELOG.md#v900)
+  - [diff](https://github.com/gradle/gradle/compare/v8.14.3...v9.0.0)
+
 ## 8.18.0
 
 ### Features
