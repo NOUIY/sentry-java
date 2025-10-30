@@ -6,6 +6,12 @@
 
 - Fallback to distinct-id as user.id logging attribute when user is not set ([#4847](https://github.com/getsentry/sentry-java/pull/4847))
 
+### Dependencies
+
+- Bump Native SDK from v0.11.3 to v0.12.0 ([#183](https://github.com/NOUIY/sentry-java/pull/183))
+  - [changelog](https://github.com/getsentry/sentry-native/blob/master/CHANGELOG.md#0120)
+  - [diff](https://github.com/getsentry/sentry-native/compare/0.11.3...0.12.0)
+
 ## 8.25.0
 
 ### Fixes
