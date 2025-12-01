@@ -138,6 +138,12 @@ SentryAndroid.init(
   - [diff](https://github.com/getsentry/sentry-native/compare/0.11.3...0.12.1)
 - Bump Spring Boot 4 to RC2 ([#4886](https://github.com/getsentry/sentry-java/pull/4886))
 
+### Dependencies
+
+- Bump Native SDK from v0.11.3 to v0.12.1 ([#187](https://github.com/NOUIY/sentry-java/pull/187))
+  - [changelog](https://github.com/getsentry/sentry-native/blob/master/CHANGELOG.md#0121)
+  - [diff](https://github.com/getsentry/sentry-native/compare/0.11.3...0.12.1)
+
 ## 8.25.0
 
 ### Fixes
