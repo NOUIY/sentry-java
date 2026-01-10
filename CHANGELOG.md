@@ -21,6 +21,12 @@
   - Currently exposed via options as an _internal_ API only.
   - If enabled alongside the NDK integration, crashes will be reported as two separate events. Users should enable only one; deduplication between both integrations will be added in a future release.
 
+### Dependencies
+
+- Bump Gradle from v8.14.3 to v9.2.1 ([#201](https://github.com/NOUIY/sentry-java/pull/201))
+  - [changelog](https://github.com/gradle/gradle/blob/master/CHANGELOG.md#v921)
+  - [diff](https://github.com/gradle/gradle/compare/v8.14.3...v9.2.1)
+
 ## 8.29.0
 
 ### Fixes
