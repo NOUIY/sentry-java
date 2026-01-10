@@ -21,6 +21,12 @@
   - Currently exposed via options as an _internal_ API only.
   - If enabled alongside the NDK integration, crashes will be reported as two separate events. Users should enable only one; deduplication between both integrations will be added in a future release.
 
+### Dependencies
+
+- Bump Native SDK from v0.12.2 to v0.12.3 ([#225](https://github.com/NOUIY/sentry-java/pull/225))
+  - [changelog](https://github.com/getsentry/sentry-native/blob/master/CHANGELOG.md#0123)
+  - [diff](https://github.com/getsentry/sentry-native/compare/0.12.2...0.12.3)
+
 ## 8.29.0
 
 ### Fixes
