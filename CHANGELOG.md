@@ -651,6 +651,12 @@ SentryAndroid.init(
 - Session Replay: Fix inconsistent `segment_id` ([#4471](https://github.com/getsentry/sentry-java/pull/4471))
 - Session Replay: Fix crash on devices with the Unisoc/Spreadtrum T606 chipset ([#4477](https://github.com/getsentry/sentry-java/pull/4477))
 
+### Dependencies
+
+- Bump Gradle from v8.14.1 to v8.14.3 ([#107](https://github.com/NOUIY/sentry-java/pull/107))
+  - [changelog](https://github.com/gradle/gradle/blob/master/CHANGELOG.md#v8143)
+  - [diff](https://github.com/gradle/gradle/compare/v8.14.1...v8.14.3)
+
 ## 8.13.2
 
 ### Fixes
