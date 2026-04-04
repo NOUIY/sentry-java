@@ -265,6 +265,12 @@
   - [changelog](https://github.com/getsentry/sentry-native/blob/master/CHANGELOG.md#0123)
   - [diff](https://github.com/getsentry/sentry-native/compare/0.12.2...0.12.3)
 
+### Dependencies
+
+- Bump Gradle from v8.14.3 to v9.2.1 ([#201](https://github.com/NOUIY/sentry-java/pull/201))
+  - [changelog](https://github.com/gradle/gradle/blob/master/CHANGELOG.md#v921)
+  - [diff](https://github.com/gradle/gradle/compare/v8.14.3...v9.2.1)
+
 ## 8.30.0
 
 ### Fixes
