@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Session Replay: Add `ReplayFrameObserver` for observing captured replay frames ([#5386](https://github.com/getsentry/sentry-java/pull/5386))
+
+  ```kotlin
+  SentryAndroid.init(context) { options ->
+    options.sessionReplay.frameObserver =
+      SentryReplayOptions.ReplayFrameObserver { hint, frameTimestamp, screenName ->
+        val bitmap = hint.getAs(TypeCheckHint.REPLAY_FRAME_BITMAP, Bitmap::class.java)
+        if (bitmap != null) {
+          try {
+            // Process the masked replay frame
+            myAnalyzer.processFrame(bitmap, frameTimestamp, screenName)
+          } finally {
+            bitmap.recycle()
+          }
+        }
+      }
+  }
+  ```
+
 ## 8.42.0
 
 ### Features
