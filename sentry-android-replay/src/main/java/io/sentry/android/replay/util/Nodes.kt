@@ -2,8 +2,8 @@
 
 package io.sentry.android.replay.util
 
-import android.graphics.Rect
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorProducer
 import androidx.compose.ui.graphics.painter.Painter
@@ -11,6 +11,8 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.node.LayoutNode
 import androidx.compose.ui.text.TextLayoutResult
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 internal class ComposeTextLayout(internal val layout: TextLayoutResult) : TextLayout {
@@ -176,7 +178,7 @@ internal fun LayoutCoordinates.boundsInWindow(rootCoordinates: LayoutCoordinates
   val boundsBottom = bounds.bottom.fastCoerceIn(0f, rootHeight)
 
   if (boundsLeft == boundsRight || boundsTop == boundsBottom) {
-    return Rect()
+    return Rect(0.0f, 0.0f, 0.0f, 0.0f)
   }
 
   val topLeft = root.localToWindow(Offset(boundsLeft, boundsTop))
@@ -200,5 +202,18 @@ internal fun LayoutCoordinates.boundsInWindow(rootCoordinates: LayoutCoordinates
   val top = fastMinOf(topLeftY, topRightY, bottomLeftY, bottomRightY)
   val bottom = fastMaxOf(topLeftY, topRightY, bottomLeftY, bottomRightY)
 
-  return Rect(left.toInt(), top.toInt(), right.toInt(), bottom.toInt())
+  return Rect(left, top, right, bottom)
+}
+
+internal fun Rect.toRect(): android.graphics.Rect {
+  // Round outward (floor min edges, ceil max edges) so that a sub-pixel but non-empty Rect doesn't
+  // collapse to a zero-width/height android.graphics.Rect. Otherwise a node could be marked visible
+  // and maskable based on the float bounds, while the integer rect the MaskRenderer draws has zero
+  // area, leaving sensitive content unmasked. Rounding outward also biases toward over-masking.
+  return android.graphics.Rect(
+    floor(left).toInt(),
+    floor(top).toInt(),
+    ceil(right).toInt(),
+    ceil(bottom).toInt(),
+  )
 }
