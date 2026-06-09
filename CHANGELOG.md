@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Improvements
+
+- Improve SDK init performance by replacing `java.net.URI` with custom string parsing for DSN ([#5448](https://github.com/getsentry/sentry-java/pull/5448))
+
 ### Fixes
 
 - Session Replay: Fix `VerifyError` in Compose masking under DexGuard/R8 obfuscation ([#5507](https://github.com/getsentry/sentry-java/pull/5507))
