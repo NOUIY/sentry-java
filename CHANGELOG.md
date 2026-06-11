@@ -4,7 +4,7 @@
 
 ### Improvements
 
-- Reduce unboxing in `DateUtils.nanosToDate` ([#5523](https://github.com/getsentry/sentry-java/pull/5523))
+- Reduce boxing to improve performance ([#5523](https://github.com/getsentry/sentry-java/pull/5523), [#5527](https://github.com/getsentry/sentry-java/pull/5527))
 
 ### Fixes
 
