@@ -13,6 +13,8 @@
 ### Improvements
 
 - Reduce boxing to improve performance ([#5523](https://github.com/getsentry/sentry-java/pull/5523), [#5527](https://github.com/getsentry/sentry-java/pull/5527), [#5551](https://github.com/getsentry/sentry-java/pull/5551))
+- Replace `Date` with a unix timestamp in `SentryNanotimeDate` to improve performance ([#5550](https://github.com/getsentry/sentry-java/pull/5550))
+  - `SentryNanotimeDate` is now marked `@ApiStatus.Internal`. A new `(long unixDateMillis, long nanos)` constructor was added, where `unixDateMillis` is milliseconds since the epoch. The existing `(Date, long)` constructor is retained but deprecated.
 
 ### Dependencies
 
