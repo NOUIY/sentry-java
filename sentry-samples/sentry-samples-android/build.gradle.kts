@@ -9,7 +9,9 @@ plugins {
   id("com.android.application")
   alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.compose)
+  alias(libs.plugins.ksp)
   alias(libs.plugins.sentry) apply false
+  alias(libs.plugins.sqldelight)
 }
 
 if (providers.gradleProperty("useSagp").isPresent) {
@@ -26,9 +28,9 @@ plugins.withId("io.sentry.android.gradle") {
     tracingInstrumentation {
       features.set(
         setOf(
+          // FILE_IO is disabled for non-SAGP builds.
           InstrumentationFeature.COMPOSE,
           InstrumentationFeature.DATABASE,
-          InstrumentationFeature.FILE_IO,
           InstrumentationFeature.OKHTTP,
         )
       )
@@ -44,7 +46,8 @@ android {
 
   defaultConfig {
     applicationId = "io.sentry.samples.android"
-    minSdk = libs.versions.minSdk.get().toInt()
+    // androidx.sqlite 2.6+ require minSdk 23; the Sentry SDK still supports 21.
+    minSdk = 23
     targetSdk = libs.versions.targetSdk.get().toInt()
     versionCode = 2
     versionName = project.version.toString()
@@ -119,7 +122,13 @@ android {
     }
   }
 
-  kotlin { compilerOptions.jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8 }
+  // Java 11 b/c androidx.room3 requires it.
+  compileOptions {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+  }
+
+  kotlin { compilerOptions.jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11 }
 
   androidComponents.beforeVariants {
     it.enable = !Config.Android.shouldSkipDebugVariant(it.buildType)
@@ -145,6 +154,17 @@ android {
   @Suppress("UnstableApiUsage") packagingOptions { jniLibs { useLegacyPackaging = true } }
 }
 
+sqldelight {
+  databases {
+    create("SampleSQLDelightDatabase") {
+      packageName.set("io.sentry.samples.android.sqlite")
+      // Keep .sq files next to the hand-written Kotlin (src/main/java/.../sqlite) instead of the
+      // default src/main/sqldelight source root.
+      srcDirs("src/main/java")
+    }
+  }
+}
+
 dependencies {
   implementation(
     kotlin(Config.kotlinStdLib, org.jetbrains.kotlin.config.KotlinCompilerVersion.VERSION)
@@ -152,6 +172,7 @@ dependencies {
 
   implementation(projects.sentryAndroid)
   implementation(projects.sentryAndroidFragment)
+  implementation(projects.sentryAndroidSqlite)
   implementation(projects.sentryAndroidTimber)
   implementation(projects.sentryCompose)
   implementation(projects.sentryKotlinExtensions)
@@ -177,17 +198,24 @@ dependencies {
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.recyclerview)
   implementation(libs.androidx.browser)
+  implementation(libs.androidx.room3.runtime)
+  implementation(libs.bundles.androidx.room2)
+  implementation(libs.bundles.androidx.sqlite.drivers)
+  implementation(libs.camerax.camera2)
+  implementation(libs.camerax.core)
+  implementation(libs.camerax.lifecycle)
+  implementation(libs.camerax.view)
   implementation(libs.coil.compose)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.lottie.compose)
   implementation(libs.retrofit)
   implementation(libs.retrofit.gson)
   implementation(libs.sentry.native.ndk)
+  implementation(libs.sqldelight.android.driver)
   implementation(libs.timber)
-  implementation(libs.camerax.core)
-  implementation(libs.camerax.camera2)
-  implementation(libs.camerax.lifecycle)
-  implementation(libs.camerax.view)
+
+  ksp(libs.androidx.room.compiler)
+  ksp(libs.androidx.room3.compiler)
 
   debugImplementation(projects.sentryAndroidDistribution)
   debugImplementation(libs.leakcanary)

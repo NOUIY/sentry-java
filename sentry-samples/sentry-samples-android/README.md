@@ -1,7 +1,7 @@
 # Sentry Sample Android App
 
 Sample application demonstrating how to use the Sentry Android SDK, including core functionality (error reporting, tracing, session replay,
-profiling) and integrations (Compose, OkHttp, etc.).
+profiling) and integrations (Compose, OkHttp, SQLite, etc.).
 
 ## How to run it?
 
