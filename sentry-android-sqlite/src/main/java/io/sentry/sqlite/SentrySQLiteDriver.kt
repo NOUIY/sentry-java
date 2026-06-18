@@ -22,11 +22,6 @@ import org.jetbrains.annotations.ApiStatus
  *     .build()
  * ```
  *
- * **Warning:** Do not use [SentrySQLiteDriver] together with
- * [SentrySupportSQLiteOpenHelper][io.sentry.android.sqlite.SentrySupportSQLiteOpenHelper] on the
- * same database file. Both wrappers instrument at different layers and combining them will produce
- * duplicate spans.
- *
  * @param delegate The [SQLiteDriver] instance to delegate calls to.
  */
 @ApiStatus.Experimental
@@ -73,11 +68,32 @@ public class SentrySQLiteDriver private constructor(private val delegate: SQLite
   public companion object {
 
     /**
-     * Wraps the provided delegate in a [SentrySQLiteDriver]. Returns the delegate as-is if already
-     * wrapped.
+     * Name of the bridge adapter often used with Room 2.7+. It implements the `SQLiteDriver`
+     * interface and its constructor consumes a `SupportSQLiteOpenHelper`. (Users of the Sentry
+     * Android Gradle Plugin will have the `SupportSQLiteOpenHelper` wrapped for them
+     * automatically.) We deliberately avoid wrapping the adapter to prevent duplicate spans.
+     *
+     * String (rather than an `is` check) lets us avoid a compile-time dependency on
+     * androidx.sqlite:sqlite-framework.
+     */
+    private const val SUPPORT_SQLITE_DRIVER_FQN = "androidx.sqlite.driver.SupportSQLiteDriver"
+
+    /**
+     * Wraps the provided delegate in a [SentrySQLiteDriver].
+     *
+     * To avoid duplicate spans, returns the delegate as-is if:
+     * 1. it's already wrapped, or
+     * 2. it's an `androidx.sqlite.driver.SupportSQLiteDriver`.
+     *
+     * In the case of (2), wrap the open helper passed to the `SupportSQLiteDriver` constructor via
+     * `SentrySupportSQLiteOpenHelper` instead.
      */
     @JvmStatic
     public fun create(delegate: SQLiteDriver): SQLiteDriver =
-      delegate as? SentrySQLiteDriver ?: SentrySQLiteDriver(delegate)
+      if (delegate is SentrySQLiteDriver || delegate.javaClass.name == SUPPORT_SQLITE_DRIVER_FQN) {
+        delegate
+      } else {
+        SentrySQLiteDriver(delegate)
+      }
   }
 }
