@@ -2,6 +2,10 @@
 
 ## 8.46.0
 
+### Fixes
+
+- Session Replay: Fix network detail response body size being unknown for gzip-compressed responses ([#5592](https://github.com/getsentry/sentry-java/pull/5592))
+
 ### Behavioral Changes
 
 - Collections returned by scope (e.g. `getBreadcrumbs`, `getTags`, `getAttachments`) are shared state and should not be mutated. ([#5541](https://github.com/getsentry/sentry-java/pull/5541))
