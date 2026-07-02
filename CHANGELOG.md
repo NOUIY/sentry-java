@@ -12,6 +12,7 @@
   - Previously, `SentryGestureListener` always started a UI transaction and only afterwards skipped binding it to the Scope when a manually-bound transaction already existed, leaving the new transaction to be dropped as an idle transaction without children.
 - Fix potential NPE within `Scope.endSession()` ([#5657](https://github.com/getsentry/sentry-java/pull/5657))
 - Fix memory leak in `ReplayIntegration` due to persisting executor not being shut down ([#5627](https://github.com/getsentry/sentry-java/pull/5627))
+- Fix AbstractMethodError when compose-ui 1.11+ is used in combination with `Modifier.sentryTag()` or the Sentry Kotlin compiler plugin ([#5672](https://github.com/getsentry/sentry-java/pull/5672))
 
 ### Performance
 
