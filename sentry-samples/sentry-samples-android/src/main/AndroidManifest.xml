@@ -66,6 +66,11 @@
       android:exported="false" />
 
     <activity
+      android:name=".DetachAttachTabsActivity"
+      android:exported="false"
+      android:theme="@style/AppTheme.Main" />
+
+    <activity
       android:name=".GesturesActivity"
       android:exported="false" />
 
