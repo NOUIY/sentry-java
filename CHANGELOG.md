@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- Fix main thread identification for tombstone (native crash) events ([#5742](https://github.com/getsentry/sentry-java/pull/5742))
+
 ### Dependencies
 
 - Bump Native SDK from v0.15.2 to v0.15.3 ([#5728](https://github.com/getsentry/sentry-java/pull/5728))
