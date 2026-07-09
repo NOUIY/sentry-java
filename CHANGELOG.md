@@ -34,6 +34,14 @@
 
 ### Dependencies
 
+- Bump OpenTelemetry to support Spring Boot 4.1 ([#5573](https://github.com/getsentry/sentry-java/pull/5573))
+  - If this causes issues for you because you are also using Spring Boot Dependency Management Plugin (io.spring.dependency-management),
+    which may downgrade the OpenTelemetry SDK, please have a look at the changelog entry above that explains how to use `sentry-opentelemetry-bom`.
+  - OpenTelemetry to 1.63.0 (was 1.60.1)
+  - OpenTelemetry Instrumentation to 2.29.0 (was 2.26.0)
+  - OpenTelemetry Instrumentation Alpha to 2.29.0-alpha (was 2.26.0-alpha)
+  - OpenTelemetry Semantic Conventions to 1.42.0 (was 1.40.0)
+  - OpenTelemetry Semantic Conventions Alpha to 1.42.0-alpha (was 1.40.0-alpha)
 - Bump Native SDK from v0.15.2 to v0.15.3 ([#5728](https://github.com/getsentry/sentry-java/pull/5728))
   - [changelog](https://github.com/getsentry/sentry-native/blob/master/CHANGELOG.md#0153)
   - [diff](https://github.com/getsentry/sentry-native/compare/0.15.2...0.15.3)

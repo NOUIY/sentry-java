@@ -13,8 +13,7 @@ feign = "11.6"
 gummyBears = "0.12.0"
 jackson = "2.18.3"
 jetbrainsCompose = "1.6.11"
-kotlin = "2.2.0"
-kotlinSpring7 = "2.2.0"
+kotlin = "2.3.21"
 kotlin-compatible-version = "1.9"
 ksp = "2.3.9"
 ktorClient = "3.0.0"
@@ -25,14 +24,13 @@ nopen = "1.0.1"
 # see https://developer.android.com/jetpack/androidx/releases/compose-kotlin
 okhttp = "4.9.2"
 openfeature = "1.18.2"
-otel = "1.60.1"
-# Keep alpha OpenTelemetry BOMs in sync with their stable counterparts: <stable-version>-alpha.
-otelAlpha = "1.60.1-alpha"
-otelInstrumentation = "2.26.0"
-otelInstrumentationAlpha = "2.26.0-alpha"
+otel = "1.63.0"
+otelAlpha = "1.63.0-alpha"
+otelInstrumentation = "2.29.0"
+otelInstrumentationAlpha = "2.29.0-alpha"
 # check https://github.com/open-telemetry/opentelemetry-java-instrumentation/blob/main/dependencyManagement/build.gradle.kts#L49 for release version above to find a compatible version
-otelSemanticConventions = "1.40.0"
-otelSemanticConventionsAlpha = "1.40.0-alpha"
+otelSemanticConventions = "1.42.0"
+otelSemanticConventionsAlpha = "1.42.0-alpha"
 retrofit = "2.9.0"
 room2 = "2.8.4"
 room3 = "3.0.0-rc01"
@@ -40,10 +38,10 @@ sagp = "6.13.0"
 sqlite = "2.6.2"
 sqliteRc = "2.7.0-rc01" # Required by Room3 3.0.0-rc*
 slf4j = "1.7.30"
-spotless = "8.4.0"
+spotless = "8.6.0"
 springboot2 = "2.7.18"
 springboot3 = "3.5.0"
-springboot4 = "4.0.0"
+springboot4 = "4.1.0"
 sqldelight = "2.3.2"
 
 # Android
@@ -54,8 +52,6 @@ minSdk = "21"
 [plugins]
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-spring = { id = "org.jetbrains.kotlin.plugin.spring", version.ref = "kotlin" }
-kotlin-spring7 = { id = "org.jetbrains.kotlin.plugin.spring", version.ref = "kotlinSpring7" }
-kotlin-jvm-spring7 = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlinSpring7" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
@@ -132,7 +128,6 @@ jackson-kotlin = { module = "com.fasterxml.jackson.module:jackson-module-kotlin"
 jetbrains-annotations = { module = "org.jetbrains:annotations", version = "23.0.0" }
 kotlin-bom = { module = "org.jetbrains.kotlin:kotlin-bom", version.ref = "kotlin" }
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
-kotlin-test-junit-spring7 = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlinSpring7" }
 kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktorClient" }
