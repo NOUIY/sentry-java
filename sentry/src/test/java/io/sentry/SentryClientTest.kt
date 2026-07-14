@@ -424,7 +424,11 @@ class SentryClientTest {
       fixture.sentryOptions.clientReportRecorder,
       listOf(
         DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.TraceMetric.category, 1),
-        DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.TraceMetricByte.category, 120),
+        DiscardedEvent(
+          DiscardReason.BEFORE_SEND.reason,
+          DataCategory.TraceMetricByte.category,
+          120,
+        ),
       ),
     )
   }
@@ -447,7 +451,11 @@ class SentryClientTest {
       fixture.sentryOptions.clientReportRecorder,
       listOf(
         DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.TraceMetric.category, 1),
-        DiscardedEvent(DiscardReason.BEFORE_SEND.reason, DataCategory.TraceMetricByte.category, 120),
+        DiscardedEvent(
+          DiscardReason.BEFORE_SEND.reason,
+          DataCategory.TraceMetricByte.category,
+          120,
+        ),
       ),
     )
   }
@@ -2341,10 +2349,9 @@ class SentryClientTest {
 
   @Test
   fun `dropping a captured error from beforeSend has no effect on session and does not send anything`() {
-    val sut =
-      fixture.getSut { options ->
-        options.beforeSend = SentryOptions.BeforeSendCallback { _, _ -> null }
-      }
+    val sut = fixture.getSut { options ->
+      options.beforeSend = SentryOptions.BeforeSendCallback { _, _ -> null }
+    }
     val scope = givenScopeWithStartedSession()
 
     sut.captureEvent(SentryEvent().apply { exceptions = createHandledException() }, scope)
@@ -2355,8 +2362,9 @@ class SentryClientTest {
 
   @Test
   fun `dropping a captured error from eventProcessor has no effect on session and does not send anything`() {
-    val sut =
-      fixture.getSut { options -> options.addEventProcessor(DropEverythingEventProcessor()) }
+    val sut = fixture.getSut { options ->
+      options.addEventProcessor(DropEverythingEventProcessor())
+    }
     val scope = givenScopeWithStartedSession()
 
     sut.captureEvent(SentryEvent().apply { exceptions = createHandledException() }, scope)
@@ -2444,13 +2452,12 @@ class SentryClientTest {
 
     fixture.sentryOptions.onDiscard = onDiscardMock
 
-    val sut =
-      fixture.getSut { options ->
-        options.sampleRate = 0.000000000001
-        options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
-        options.beforeSend = beforeSendMock
-        options.addEventProcessor(globalEventProcessorMock)
-      }
+    val sut = fixture.getSut { options ->
+      options.sampleRate = 0.000000000001
+      options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
+      options.beforeSend = beforeSendMock
+      options.addEventProcessor(globalEventProcessorMock)
+    }
     val scope = givenScopeWithStartedSession()
     scope.addEventProcessor(scopedEventProcessorMock)
 
@@ -2487,13 +2494,12 @@ class SentryClientTest {
       it.arguments.first() as SentryEvent
     }
 
-    val sut =
-      fixture.getSut { options ->
-        options.sampleRate = 0.000000000001
-        options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
-        options.beforeSend = beforeSendMock
-        options.addEventProcessor(globalEventProcessorMock)
-      }
+    val sut = fixture.getSut { options ->
+      options.sampleRate = 0.000000000001
+      options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
+      options.beforeSend = beforeSendMock
+      options.addEventProcessor(globalEventProcessorMock)
+    }
     val scope = givenScopeWithStartedSession()
     scope.addEventProcessor(scopedEventProcessorMock)
 
@@ -2530,13 +2536,12 @@ class SentryClientTest {
     }
     whenever(beforeSendMock.execute(any(), anyOrNull())).thenReturn(null)
 
-    val sut =
-      fixture.getSut { options ->
-        options.sampleRate = 0.000000000001
-        options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
-        options.beforeSend = beforeSendMock
-        options.addEventProcessor(globalEventProcessorMock)
-      }
+    val sut = fixture.getSut { options ->
+      options.sampleRate = 0.000000000001
+      options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
+      options.beforeSend = beforeSendMock
+      options.addEventProcessor(globalEventProcessorMock)
+    }
     val scope = givenScopeWithStartedSession()
     scope.addEventProcessor(scopedEventProcessorMock)
 
@@ -2569,13 +2574,12 @@ class SentryClientTest {
     whenever(globalEventProcessorMock.process(any<SentryEvent>(), anyOrNull())).thenReturn(null)
     whenever(beforeSendMock.execute(any(), anyOrNull())).thenReturn(null)
 
-    val sut =
-      fixture.getSut { options ->
-        options.sampleRate = 0.000000000001
-        options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
-        options.beforeSend = beforeSendMock
-        options.addEventProcessor(globalEventProcessorMock)
-      }
+    val sut = fixture.getSut { options ->
+      options.sampleRate = 0.000000000001
+      options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
+      options.beforeSend = beforeSendMock
+      options.addEventProcessor(globalEventProcessorMock)
+    }
     val scope = givenScopeWithStartedSession()
     scope.addEventProcessor(scopedEventProcessorMock)
 
@@ -2610,13 +2614,12 @@ class SentryClientTest {
     whenever(globalEventProcessorMock.process(any<SentryEvent>(), anyOrNull())).thenReturn(null)
     whenever(beforeSendMock.execute(any(), anyOrNull())).thenReturn(null)
 
-    val sut =
-      fixture.getSut { options ->
-        options.sampleRate = 0.000000000001
-        options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
-        options.beforeSend = beforeSendMock
-        options.addEventProcessor(globalEventProcessorMock)
-      }
+    val sut = fixture.getSut { options ->
+      options.sampleRate = 0.000000000001
+      options.addIgnoredExceptionForType(NegativeArraySizeException::class.java)
+      options.beforeSend = beforeSendMock
+      options.addEventProcessor(globalEventProcessorMock)
+    }
     val scope = givenScopeWithStartedSession()
     scope.addEventProcessor(scopedEventProcessorMock)
 
@@ -2658,14 +2661,13 @@ class SentryClientTest {
 
   @Test
   fun `can add to attachments in beforeSend`() {
-    val sut =
-      fixture.getSut { options ->
-        options.setBeforeSend { event, hints ->
-          assertEquals(listOf(fixture.attachment, fixture.attachment2), hints.attachments)
-          hints.addAttachment(fixture.attachment3)
-          event
-        }
+    val sut = fixture.getSut { options ->
+      options.setBeforeSend { event, hints ->
+        assertEquals(listOf(fixture.attachment, fixture.attachment2), hints.attachments)
+        hints.addAttachment(fixture.attachment3)
+        event
       }
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addAttachment(fixture.attachment2)
@@ -2676,13 +2678,12 @@ class SentryClientTest {
 
   @Test
   fun `can replace attachments in beforeSend`() {
-    val sut =
-      fixture.getSut { options ->
-        options.setBeforeSend { event, hints ->
-          hints.replaceAttachments(listOf(fixture.attachment3))
-          event
-        }
+    val sut = fixture.getSut { options ->
+      options.setBeforeSend { event, hints ->
+        hints.replaceAttachments(listOf(fixture.attachment3))
+        event
       }
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addAttachment(fixture.attachment2)
@@ -2693,22 +2694,21 @@ class SentryClientTest {
 
   @Test
   fun `can add to attachments in eventProcessor`() {
-    val sut =
-      fixture.getSut { options ->
-        options.addEventProcessor(
-          object : EventProcessor {
-            override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
-              assertEquals(listOf(fixture.attachment, fixture.attachment2), hint.attachments)
-              hint.addAttachment(fixture.attachment3)
-              return event
-            }
-
-            override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
-              return transaction
-            }
+    val sut = fixture.getSut { options ->
+      options.addEventProcessor(
+        object : EventProcessor {
+          override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
+            assertEquals(listOf(fixture.attachment, fixture.attachment2), hint.attachments)
+            hint.addAttachment(fixture.attachment3)
+            return event
           }
-        )
-      }
+
+          override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
+            return transaction
+          }
+        }
+      )
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addAttachment(fixture.attachment2)
@@ -2719,21 +2719,20 @@ class SentryClientTest {
 
   @Test
   fun `can replace attachments in eventProcessor`() {
-    val sut =
-      fixture.getSut { options ->
-        options.addEventProcessor(
-          object : EventProcessor {
-            override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
-              hint.replaceAttachments(listOf(fixture.attachment3))
-              return event
-            }
-
-            override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
-              return transaction
-            }
+    val sut = fixture.getSut { options ->
+      options.addEventProcessor(
+        object : EventProcessor {
+          override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
+            hint.replaceAttachments(listOf(fixture.attachment3))
+            return event
           }
-        )
-      }
+
+          override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
+            return transaction
+          }
+        }
+      )
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addAttachment(fixture.attachment2)
@@ -2784,22 +2783,21 @@ class SentryClientTest {
 
   @Test
   fun `can add to attachments in eventProcessor for transactions`() {
-    val sut =
-      fixture.getSut { options ->
-        options.addEventProcessor(
-          object : EventProcessor {
-            override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
-              return event
-            }
-
-            override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
-              assertEquals(listOf(fixture.attachment, fixture.attachment2), hint.attachments)
-              hint.addAttachment(fixture.attachment3)
-              return transaction
-            }
+    val sut = fixture.getSut { options ->
+      options.addEventProcessor(
+        object : EventProcessor {
+          override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
+            return event
           }
-        )
-      }
+
+          override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
+            assertEquals(listOf(fixture.attachment, fixture.attachment2), hint.attachments)
+            hint.addAttachment(fixture.attachment3)
+            return transaction
+          }
+        }
+      )
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addAttachment(fixture.attachment2)
@@ -2820,21 +2818,20 @@ class SentryClientTest {
 
   @Test
   fun `can replace attachments in eventProcessor for transactions`() {
-    val sut =
-      fixture.getSut { options ->
-        options.addEventProcessor(
-          object : EventProcessor {
-            override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
-              return event
-            }
-
-            override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
-              hint.replaceAttachments(listOf(fixture.attachment3))
-              return transaction
-            }
+    val sut = fixture.getSut { options ->
+      options.addEventProcessor(
+        object : EventProcessor {
+          override fun process(event: SentryEvent, hint: Hint): SentryEvent? {
+            return event
           }
-        )
-      }
+
+          override fun process(transaction: SentryTransaction, hint: Hint): SentryTransaction? {
+            hint.replaceAttachments(listOf(fixture.attachment3))
+            return transaction
+          }
+        }
+      )
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addAttachment(fixture.attachment2)
@@ -2855,8 +2852,9 @@ class SentryClientTest {
 
   @Test
   fun `passing attachments via hint into breadcrumb ignores them`() {
-    val sut =
-      fixture.getSut { options -> options.setBeforeBreadcrumb { breadcrumb, hints -> breadcrumb } }
+    val sut = fixture.getSut { options ->
+      options.setBeforeBreadcrumb { breadcrumb, hints -> breadcrumb }
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addBreadcrumb(
@@ -2871,13 +2869,12 @@ class SentryClientTest {
 
   @Test
   fun `adding attachments in beforeBreadcrumb ignores them`() {
-    val sut =
-      fixture.getSut { options ->
-        options.setBeforeBreadcrumb { breadcrumb, hints ->
-          hints.addAttachment(fixture.attachment)
-          breadcrumb
-        }
+    val sut = fixture.getSut { options ->
+      options.setBeforeBreadcrumb { breadcrumb, hints ->
+        hints.addAttachment(fixture.attachment)
+        breadcrumb
       }
+    }
 
     val scope = givenScopeWithStartedSession()
     scope.addBreadcrumb(Breadcrumb.info("hello from breadcrumb"))
@@ -3160,11 +3157,11 @@ class SentryClientTest {
   @Test
   fun `beforeEnvelopeCallback is executed`() {
     var beforeEnvelopeCalled = false
-    val sut =
-      fixture.getSut { options ->
-        options.beforeEnvelopeCallback =
-          SentryOptions.BeforeEnvelopeCallback { _, _ -> beforeEnvelopeCalled = true }
+    val sut = fixture.getSut { options ->
+      options.beforeEnvelopeCallback = SentryOptions.BeforeEnvelopeCallback { _, _ ->
+        beforeEnvelopeCalled = true
       }
+    }
 
     sut.captureEvent(SentryEvent(), Hint())
 
@@ -3173,11 +3170,11 @@ class SentryClientTest {
 
   @Test
   fun `beforeEnvelopeCallback may fail, but the transport is still sends the envelope `() {
-    val sut =
-      fixture.getSut { options ->
-        options.beforeEnvelopeCallback =
-          SentryOptions.BeforeEnvelopeCallback { _, _ -> RuntimeException("hook failed") }
+    val sut = fixture.getSut { options ->
+      options.beforeEnvelopeCallback = SentryOptions.BeforeEnvelopeCallback { _, _ ->
+        RuntimeException("hook failed")
       }
+    }
 
     sut.captureEvent(SentryEvent(), Hint())
     verify(fixture.transport).send(anyOrNull(), anyOrNull())
@@ -3444,7 +3441,9 @@ class SentryClientTest {
       }
     )
     fixture.sentryOptions.sessionReplay.beforeErrorSampling =
-      SentryReplayOptions.BeforeErrorSamplingCallback { _, _ -> false }
+      SentryReplayOptions.BeforeErrorSamplingCallback { _, _ ->
+        false
+      }
     val sut = fixture.getSut()
 
     sut.captureEvent(SentryEvent().apply { exceptions = listOf(SentryException()) })
@@ -3462,7 +3461,9 @@ class SentryClientTest {
       }
     )
     fixture.sentryOptions.sessionReplay.beforeErrorSampling =
-      SentryReplayOptions.BeforeErrorSamplingCallback { _, _ -> true }
+      SentryReplayOptions.BeforeErrorSamplingCallback { _, _ ->
+        true
+      }
     val sut = fixture.getSut()
 
     sut.captureEvent(SentryEvent().apply { exceptions = listOf(SentryException()) })
@@ -3496,7 +3497,9 @@ class SentryClientTest {
       }
     )
     fixture.sentryOptions.sessionReplay.beforeErrorSampling =
-      SentryReplayOptions.BeforeErrorSamplingCallback { _, _ -> throw RuntimeException("test") }
+      SentryReplayOptions.BeforeErrorSamplingCallback { _, _ ->
+        throw RuntimeException("test")
+      }
     val sut = fixture.getSut()
 
     sut.captureEvent(SentryEvent().apply { exceptions = listOf(SentryException()) })
