@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 8.50.0
 
 ### Android 17 support
 
