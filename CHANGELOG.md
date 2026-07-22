@@ -17,6 +17,7 @@
   - [changelog](https://github.com/getsentry/sentry-native/blob/master/CHANGELOG.md#0154)
   - [diff](https://github.com/getsentry/sentry-native/compare/0.15.3...0.15.4)
 - The SDK is now compiled with Android Gradle Plugin 9.2.1 ([#5779](https://github.com/getsentry/sentry-java/pull/5779))
+- The SDK has been fully tested for compatibility with Android 17 and platform 37; it is now compiled and tested against it ([#5796](https://github.com/getsentry/sentry-java/pull/5796))
 
 ## 8.49.0
 
