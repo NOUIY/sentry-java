@@ -9,6 +9,7 @@
 - `SentryTagModifierNode.isImportantForBounds` now matches the default behavior and returns `true` ([#5789](https://github.com/getsentry/sentry-java/pull/5789))
 - Prevent a `StackOverflowError` when a `beforeSend`, `beforeBreadcrumb`, `beforeSendLog`, or `beforeEnvelope` callback triggers another capture (directly or through a logging integration such as Timber) ([#5737](https://github.com/getsentry/sentry-java/pull/5737))
   - Captures made from within a user callback (event, transaction, breadcrumb, log, envelope, or check-in) are now dropped while that callback runs, instead of recursing. Captures made by event processors are unaffected.
+- Replace deprecated `ThrowableProxy` with `LogEvent#getThrown()` in `sentry-log4j2` ([#5751](https://github.com/getsentry/sentry-java/pull/5751))
 
 ### Dependencies
 
